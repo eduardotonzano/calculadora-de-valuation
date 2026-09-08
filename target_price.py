@@ -6,11 +6,22 @@ returns a dict with both the inputs used and the resulting per-share
 target price, so the methods can be laid out side by side against the DCF
 result as a "football field" (see `football_field()` below).
 
-Unlike the DCF, these are current (undiscounted) fair-value estimates: a
-target multiple applied to a forward metric, mirroring how the source
-file's own "TRADING MULTIPLES" block reads today's market-implied
-multiples off FY2027E/FY2030E consensus estimates. FY2027E is used as the
-default target year for the same reason the source file anchors there.
+Unlike the DCF, `target_price` here is a **future, undiscounted** estimate
+for `target_year` specifically — a target multiple applied to a forward
+metric, mirroring how the source file's own "TRADING MULTIPLES" block
+reads today's market-implied multiples off FY2027E/FY2030E consensus
+estimates, and how sell-side research actually quotes a price target
+(e.g. "$350, 12-18 months out" is the projected future price, not a
+present-value number). FY2027E is used as the default target year for the
+same reason the source file anchors there.
+
+Each result also carries `present_value_target_price`: `target_price`
+discounted back to today at the company's own WACC over `years_out`
+(`target_year` minus the latest actual fiscal year). This is the number
+that's actually comparable to the DCF's price (which already is a
+present-value estimate) — `football_field()` uses it for exactly that
+side-by-side comparison — while `target_price` stays the number a
+research report would actually print.
 
 P/E and PEG are built on Street-consensus EPS (`historicals.eps_diluted_adjusted`),
 which is only available for FY2026E-FY2030E — the source workbook has no
@@ -46,6 +57,23 @@ def _get_eps(conn: sqlite3.Connection, company_id: int, fiscal_year: int) -> flo
     if row is None or row["eps_diluted_adjusted"] is None:
         raise ValueError(f"No EPS data for fiscal year {fiscal_year}")
     return row["eps_diluted_adjusted"]
+
+
+def _latest_actual_fiscal_year(conn: sqlite3.Connection, company_id: int) -> int:
+    return _row_to_dict(
+        conn,
+        """SELECT MAX(fiscal_year) AS fy FROM historicals
+           WHERE company_id = ? AND period_type = 'actual'""",
+        (company_id,),
+    )["fy"]
+
+
+def _discount_to_present(price: float, wacc: float, years_out: int) -> float:
+    """`price`, expected at `years_out` years from now, brought back to a
+    present-value estimate at the company's own WACC -- the same discount
+    rate the DCF itself uses, so the result is genuinely comparable to
+    run_dcf()'s price_per_share."""
+    return price / (1 + wacc) ** years_out
 
 
 def _get_trading_comp(conn: sqlite3.Connection, company_id: int, metric: str, fiscal_year: int) -> float | None:
@@ -92,11 +120,15 @@ def from_ev_ebitda(
     equity_value = enterprise_value - wacc_data["net_debt"]
     target_price = equity_value / wacc_data["shares_outstanding"]
 
+    years_out = target_year - _latest_actual_fiscal_year(conn, company_id)
+    pv_target_price = _discount_to_present(target_price, wacc_data["wacc"], years_out)
+
     return {
         "method": "EV/EBITDA",
         "ticker": ticker,
         "scenario": scenario,
         "target_year": target_year,
+        "years_out": years_out,
         "ebitda": ebitda,
         "ev_ebitda_multiple": ev_ebitda_multiple,
         "multiple_source": multiple_source,
@@ -107,6 +139,8 @@ def from_ev_ebitda(
         "current_price": wacc_data["stock_price"],
         "target_price": target_price,
         "implied_upside": target_price / wacc_data["stock_price"] - 1,
+        "present_value_target_price": pv_target_price,
+        "present_value_implied_upside": pv_target_price / wacc_data["stock_price"] - 1,
     }
 
 
@@ -136,16 +170,22 @@ def from_pe(
 
     target_price = pe_multiple * eps
 
+    years_out = target_year - _latest_actual_fiscal_year(conn, company_id)
+    pv_target_price = _discount_to_present(target_price, wacc_data["wacc"], years_out)
+
     return {
         "method": "P/E",
         "ticker": ticker,
         "target_year": target_year,
+        "years_out": years_out,
         "eps": eps,
         "pe_multiple": pe_multiple,
         "multiple_source": multiple_source,
         "current_price": wacc_data["stock_price"],
         "target_price": target_price,
         "implied_upside": target_price / wacc_data["stock_price"] - 1,
+        "present_value_target_price": pv_target_price,
+        "present_value_implied_upside": pv_target_price / wacc_data["stock_price"] - 1,
     }
 
 
@@ -168,13 +208,9 @@ def from_peg(
     company_id = get_company_id(conn, ticker)
     wacc_data = get_wacc(conn, company_id)
 
+    latest_actual_year = _latest_actual_fiscal_year(conn, company_id)
     if base_year is None:
-        base_year = _row_to_dict(
-            conn,
-            """SELECT MAX(fiscal_year) AS fy FROM historicals
-               WHERE company_id = ? AND period_type = 'actual'""",
-            (company_id,),
-        )["fy"]
+        base_year = latest_actual_year
 
     eps_base = _get_eps(conn, company_id, base_year)
     eps_target = _get_eps(conn, company_id, target_year)
@@ -193,11 +229,15 @@ def from_peg(
     implied_pe = target_peg * (eps_cagr * 100)
     target_price = implied_pe * eps_target
 
+    years_out = target_year - latest_actual_year
+    pv_target_price = _discount_to_present(target_price, wacc_data["wacc"], years_out)
+
     return {
         "method": "PEG",
         "ticker": ticker,
         "base_year": base_year,
         "target_year": target_year,
+        "years_out": years_out,
         "eps_base": eps_base,
         "eps_target": eps_target,
         "eps_cagr": eps_cagr,
@@ -206,6 +246,8 @@ def from_peg(
         "current_price": wacc_data["stock_price"],
         "target_price": target_price,
         "implied_upside": target_price / wacc_data["stock_price"] - 1,
+        "present_value_target_price": pv_target_price,
+        "present_value_implied_upside": pv_target_price / wacc_data["stock_price"] - 1,
     }
 
 
@@ -217,9 +259,22 @@ def football_field(conn: sqlite3.Connection, ticker: str, scenario: str = "base"
     from a hand-built DCF tab, see data/load_from_modl.py) is skipped
     rather than raising, so one unavailable method doesn't take down the
     whole comparison.
+
+    Every entry carries `present_value_target_price`: the DCF's own price
+    already is one (`years_out=0`, present value by construction); each
+    multiples method's is its future `target_price` discounted back to
+    today at WACC (see module docstring). Use `present_value_target_price`
+    for a chart that compares all four methods on the same basis; use
+    `target_price` (and `target_year`) to show the number the way a
+    research report would actually print it.
     """
     dcf_result = run_dcf(conn, ticker, scenario)
-    results = [{"method": "DCF", "target_price": dcf_result["price_per_share"]}]
+    results = [{
+        "method": "DCF",
+        "target_price": dcf_result["price_per_share"],
+        "present_value_target_price": dcf_result["price_per_share"],
+        "years_out": 0,
+    }]
     for fn, kwargs in [
         (from_ev_ebitda, dict(scenario=scenario)),
         (from_pe, {}),
@@ -247,7 +302,15 @@ def main() -> None:
             results = football_field(conn, args.ticker, args.scenario)
             for result in results:
                 tag = " (scenario-independent, consensus EPS)" if result["method"] in scenario_independent else ""
-                print(f"  {result['method']:<10} ${result['target_price']:,.2f}{tag}")
+                horizon = (
+                    "today"
+                    if result["years_out"] == 0
+                    else f"FY{result['target_year']}, {result['years_out']}y out"
+                )
+                print(
+                    f"  {result['method']:<10} ${result['target_price']:,.2f} "
+                    f"({horizon}) -> PV ${result['present_value_target_price']:,.2f}{tag}"
+                )
             missing = {"EV/EBITDA", "P/E", "PEG"} - {r["method"] for r in results}
             if missing:
                 print(f"  (indisponível: {', '.join(sorted(missing))} — sem dados suficientes para esse método)")

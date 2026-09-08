@@ -592,3 +592,64 @@ do ambiente onde este projeto é desenvolvido. Isso não limita a busca por
 preço/beta em si: qualquer ticker real digitado funciona via `yfinance`,
 esteja ele na lista curada ou não — a lista é só um atalho de autocomplete
 para os nomes mais comuns.
+
+## Rastreabilidade de origem dos inputs de mercado
+
+A aba WACC mostrava "input" na coluna Fórmula para Risk-free rate, Beta,
+ERP e Preço da ação — verdade, mas inútil: não dizia se o número veio da
+aba WACC do arquivo original, de uma busca automática via `yfinance`, ou
+de digitação manual no upload. Esses quatro campos agora carregam uma
+`source` própria (coluna nova em `wacc_inputs`, populada em
+`load_wacc_inputs()` para o Modo A e a partir do dicionário `market_data`
+para o Modo B), com um texto específico para cada caminho: a célula exata
+do Excel no Modo A ("Aba WACC do arquivo original (células B5, B6, B7,
+B18)"), o ticker e a API no caso de busca automática ("Yahoo Finance
+(yfinance), ticker X — preço/beta ao vivo, 10Y Treasury via ^TNX, ERP fixo
+(Damodaran)"), ou "Informado manualmente no upload" quando o usuário
+digitou os valores à mão. A aba WACC exibe esse texto no lugar do "input"
+genérico.
+
+## Preço-alvo: horizonte explícito e valor presente comparável ao DCF
+
+Os métodos de múltiplo (EV/EBITDA, P/E, PEG) projetam um preço para um ano
+futuro específico (`target_year`, por padrão FY2027E) sem desconto — é
+assim que um relatório de research realmente publica um preço-alvo (ex.:
+o alvo de US$350 da Morgan Stanley para a Vertiv é para um horizonte de
+12-18 meses, não um valor de hoje). O problema: colocar esse número lado a
+lado com o preço do DCF — que já é um valor presente — sem dizer o
+horizonte de cada um é enganoso, e fazia os preços-alvo de múltiplo
+parecerem sistematicamente mais otimistas do que realmente são.
+
+Cada resultado de `target_price.py` agora carrega três campos novos:
+`years_out` (anos entre o último ano real reportado e `target_year`),
+`present_value_target_price` (o preço-alvo trazido a valor presente pelo
+WACC da própria empresa: `target_price / (1 + wacc) ** years_out`) e
+`present_value_implied_upside` (o upside implícito calculado sobre esse
+valor presente, não sobre o número nominal futuro). `target_price` e
+`target_year` continuam existindo sem alteração — são o número que um
+research realmente imprimiria.
+
+O gráfico football field na aba Sumário agora compara `present_value_target_price`
+entre os quatro métodos (base genuinamente comparável, já que o preço do
+DCF é `years_out = 0` por construção), e a tabela de apoio abaixo mostra
+lado a lado o preço-alvo nominal, o horizonte (`FY{ano} (+N anos)`) e o
+valor presente. A aba Múltiplos detalha o cálculo completo de cada
+método, incluindo a linha final de desconto a valor presente. No exemplo
+da AppLovin (caso base, FY2027E, 2 anos de horizonte): o PEG nominal de
+$913.87 (inflado pela heurística PEG=1,0x aplicada a um CAGR de EPS de
+consenso de ~45%, já documentado como limitação conhecida) cai para
+$705.52 em valor presente — ainda o mais otimista dos quatro, mas na
+mesma base do DCF ($388.54) em vez de comparado com um número de 2 anos
+no futuro sem desconto.
+
+## Glossário
+
+Nova aba "Glossário" no app reúne, em uma frase cada, todo termo técnico
+usado nas outras abas — WACC, CAPM, Ke/Kd, beta, ERP, EBIT/EBITDA/NOPAT,
+D&A, CapEx, NWC, UFCF, mid-year convention, valor terminal (múltiplo de
+saída vs. Gordon Growth), g implícito, EV/Equity Value, P/E, PEG, trading
+comps, ano-alvo, valor presente do preço-alvo, football field, grid de
+sensibilidade e a distinção `modl_tabs` vs. `derived`. Agrupado na mesma
+ordem em que os conceitos aparecem no app (WACC → projeção/FCF → valor
+terminal → preço-alvo/múltiplos → sensibilidade), para servir de
+referência rápida sem precisar sair do app.

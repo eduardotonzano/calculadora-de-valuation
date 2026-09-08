@@ -413,6 +413,7 @@ def test_load_workbook_data_mode_b_computes_from_historicals(tmp_path):
         "equity_risk_premium": 0.05,
         "stock_price": 50.0,
         "shares_outstanding": 100.0,
+        "source": "Informado manualmente no upload",
     }
     # Latest actual year (2024): revenue 1331, EBITDA 1331*0.25=332.75,
     # net_debt 500, market_cap 50*100=5000.
