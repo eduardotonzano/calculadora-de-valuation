@@ -18,6 +18,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
+import openpyxl
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -191,24 +192,61 @@ else:
 
 st.sidebar.subheader("Enviar planilha Bloomberg MODL")
 uploaded_file = st.sidebar.file_uploader(
-    "Arquivo .xlsx (abas Multiple Periods, DCF, WACC)", type=["xlsx"],
+    "Arquivo .xlsx (abas: Multiple Periods; DCF e WACC só se você tiver)", type=["xlsx"],
 )
 
 if uploaded_file is not None:
     file_signature = hashlib.md5(uploaded_file.getvalue()).hexdigest()
     if st.session_state.get("last_upload_signature") != file_signature:
+        uploaded_file.seek(0)
         try:
-            data = load_workbook_data(uploaded_file)
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            write_to_db(Path(db_path), SCHEMA_PATH, data)
-        except Exception as exc:  # noqa: BLE001 — surface any parse/load failure to the user
-            st.sidebar.error(f"Falha ao carregar o arquivo: {exc}")
-        else:
-            st.session_state.last_upload_signature = file_signature
-            st.session_state.last_uploaded_ticker = data["ticker"]
-            get_connection.clear()
-            st.sidebar.success(f"{data['ticker']} ({data['name']}) carregado em `{db_path}`.")
-            st.rerun()
+            sheet_names = openpyxl.load_workbook(uploaded_file, read_only=True).sheetnames
+        except Exception as exc:  # noqa: BLE001
+            st.sidebar.error(f"Falha ao ler o arquivo: {exc}")
+            sheet_names = None
+        uploaded_file.seek(0)
+
+        market_data = None
+        ready_to_load = sheet_names is not None
+        needs_market_data = sheet_names is not None and not {"DCF", "WACC"} <= set(sheet_names)
+
+        if needs_market_data:
+            st.sidebar.info(
+                "Esta planilha só tem 'Multiple Periods' (sem abas DCF/WACC prontas) — "
+                "o formato normal de um export Bloomberg MODL. As premissas de cenário e "
+                "o WACC vão ser calculados a partir dos dados históricos; só preciso de 4 "
+                "números de mercado que não existem em nenhum export de demonstrações "
+                "financeiras — preencha com dados reais e atuais."
+            )
+            with st.sidebar.form("market_data_form"):
+                stock_price = st.number_input("Preço atual da ação ($)", min_value=0.0, value=0.0, step=0.01)
+                beta = st.number_input("Beta (5Y mensal)", min_value=0.0, value=1.0, step=0.05)
+                risk_free_pct = st.number_input("Risk-free rate — 10Y Treasury (%)", min_value=0.0, value=4.0, step=0.05)
+                erp_pct = st.number_input("Equity Risk Premium (%)", min_value=0.0, value=4.5, step=0.05)
+                submitted = st.form_submit_button("Carregar com esses dados de mercado")
+            ready_to_load = submitted and stock_price > 0
+            if submitted and stock_price <= 0:
+                st.sidebar.error("Preço da ação precisa ser maior que zero.")
+            market_data = {
+                "risk_free_rate": risk_free_pct / 100,
+                "beta": beta,
+                "equity_risk_premium": erp_pct / 100,
+                "stock_price": stock_price,
+            }
+
+        if ready_to_load:
+            try:
+                data = load_workbook_data(uploaded_file, market_data=market_data)
+                Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+                write_to_db(Path(db_path), SCHEMA_PATH, data)
+            except Exception as exc:  # noqa: BLE001 — surface any parse/load failure to the user
+                st.sidebar.error(f"Falha ao carregar o arquivo: {exc}")
+            else:
+                st.session_state.last_upload_signature = file_signature
+                st.session_state.last_uploaded_ticker = data["ticker"]
+                get_connection.clear()
+                st.sidebar.success(f"{data['ticker']} ({data['name']}) carregado em `{db_path}`.")
+                st.rerun()
 
 st.sidebar.divider()
 
@@ -339,20 +377,30 @@ with tab_summary:
     )
     st.caption("Fórmulas e inputs completos de cada método de múltiplo: aba *Múltiplos*.")
 
-    st.markdown("#### Achados sobre o arquivo original")
-    note(
-        "<b>5 vs. 13 anos de projeção explícita.</b> O template Bloomberg projeta FCF "
-        "para 13 anos (FY2026E–FY2038E) mas soma apenas os 5 primeiros na célula de "
-        "avaliação (<code>C78 = SUM(C75:G75)</code>), com valor terminal ancorado no "
-        "EBITDA do ano 5. 8 anos de fluxo de caixa calculado ficam de fora da conta. "
-        "Compare no seletor \u201cAnos de projeção explícita\u201d na barra lateral: "
-        "$388.54 (5 anos, validado) vs. $412.19 (13 anos)."
-    )
-    note(
-        "<b>As três tabelas de sensibilidade da planilha não concordam entre si nem com "
-        "a célula principal.</b> Ver aba Sensibilidade e Metodologia para a tabela "
-        "completa de comparação."
-    )
+    if company["data_source"] == "modl_tabs":
+        st.markdown("#### Achados sobre o arquivo original")
+        note(
+            "<b>5 vs. 13 anos de projeção explícita.</b> O template Bloomberg projeta FCF "
+            "para 13 anos (FY2026E–FY2038E) mas soma apenas os 5 primeiros na célula de "
+            "avaliação (<code>C78 = SUM(C75:G75)</code>), com valor terminal ancorado no "
+            "EBITDA do ano 5. 8 anos de fluxo de caixa calculado ficam de fora da conta. "
+            "Compare no seletor \u201cAnos de projeção explícita\u201d na barra lateral: "
+            "$388.54 (5 anos, validado) vs. $412.19 (13 anos)."
+        )
+        note(
+            "<b>As três tabelas de sensibilidade da planilha não concordam entre si nem com "
+            "a célula principal.</b> Ver aba Sensibilidade e Metodologia para a tabela "
+            "completa de comparação."
+        )
+    else:
+        st.markdown("#### Como esses números foram calculados")
+        note(
+            "Essa planilha não tinha abas DCF/WACC prontas — o caso normal de um export "
+            "Bloomberg MODL (só a AppLovin, o exemplo padrão, teve essas abas montadas à "
+            "mão). Premissas de cenário, WACC e o múltiplo terminal foram <b>calculados</b> "
+            "a partir dos dados históricos + os 4 números de mercado informados no upload "
+            "— não extraídos de fórmulas prontas. Ver aba Metodologia para o detalhe."
+        )
 
 # =================================================================== WACC ===
 with tab_wacc:
@@ -644,32 +692,44 @@ with tab_sens:
             "das outras duas tabelas."
         )
 
-    st.markdown("### O arquivo original não reconcilia essas tabelas com a própria célula principal")
-    st.markdown(
-        "Ao validar `sensitivity.py` célula a célula contra o arquivo Bloomberg, as "
-        "referências de \"preço-alvo no caso base\" da própria planilha divergem "
-        "entre si:"
-    )
-    mismatch_df = pd.DataFrame(
-        SOURCE_FILE_BASE_CASE_CELLS, columns=["Célula / fonte", "Fórmula usada pela planilha", "Preço-alvo ($)"]
-    ).set_index("Célula / fonte")
-    st.table(mismatch_df.style.format({"Preço-alvo ($)": "${:,.2f}"}))
-    note(
-        "A Tabela 2 (Cresc. × Margem) é a única internamente consistente — soma os 13 "
-        "anos completos com o valor terminal alinhado ao último ano. É por isso que, "
-        "com \u201cAnos de projeção explícita\u201d = 13 na barra lateral, o grid de "
-        "Crescimento × Margem acima reproduz D110 = $412.19 célula a célula. As "
-        "Tabelas 1 (WACC × Múltiplo) e 3 (Risk-Free × Beta) somam 13 anos de FCF mas "
-        "ainda âncoram o EBITDA terminal no ano 5, descontando esse valor obsoleto 8 "
-        "anos além do que deveria — por isso as duas dão o mesmo $313.31 no caso "
-        "base, apesar de sensibilizarem inputs completamente diferentes. Nem "
-        "conservador nem agressivo, apenas inconsistente."
-    )
+    if company["data_source"] == "modl_tabs":
+        st.markdown("### O arquivo original não reconcilia essas tabelas com a própria célula principal")
+        st.markdown(
+            "Ao validar `sensitivity.py` célula a célula contra o arquivo Bloomberg, as "
+            "referências de \"preço-alvo no caso base\" da própria planilha divergem "
+            "entre si:"
+        )
+        mismatch_df = pd.DataFrame(
+            SOURCE_FILE_BASE_CASE_CELLS, columns=["Célula / fonte", "Fórmula usada pela planilha", "Preço-alvo ($)"]
+        ).set_index("Célula / fonte")
+        st.table(mismatch_df.style.format({"Preço-alvo ($)": "${:,.2f}"}))
+        note(
+            "A Tabela 2 (Cresc. × Margem) é a única internamente consistente — soma os 13 "
+            "anos completos com o valor terminal alinhado ao último ano. É por isso que, "
+            "com \u201cAnos de projeção explícita\u201d = 13 na barra lateral, o grid de "
+            "Crescimento × Margem acima reproduz D110 = $412.19 célula a célula. As "
+            "Tabelas 1 (WACC × Múltiplo) e 3 (Risk-Free × Beta) somam 13 anos de FCF mas "
+            "ainda âncoram o EBITDA terminal no ano 5, descontando esse valor obsoleto 8 "
+            "anos além do que deveria — por isso as duas dão o mesmo $313.31 no caso "
+            "base, apesar de sensibilizarem inputs completamente diferentes. Nem "
+            "conservador nem agressivo, apenas inconsistente."
+        )
+    else:
+        st.markdown("### Sensibilidade em cima de premissas calculadas, não extraídas")
+        note(
+            "Essa empresa não tem um arquivo Bloomberg original com abas DCF/WACC para "
+            "comparar contra — as premissas de cenário, o WACC e o múltiplo terminal "
+            "acima já são o resultado de <code>data/load_from_modl.py</code> calculando "
+            "tudo a partir dos dados históricos (ver aba Metodologia). Os três grids "
+            "ainda reconciliam entre si e com o preço-alvo do DCF na aba Sumário, pelo "
+            "mesmo motivo: todos chamam <code>dcf_engine.run_dcf()</code>."
+        )
 
 # =============================================================== Metodologia ===
 with tab_method:
-    st.markdown(
-        """
+    if company["data_source"] == "modl_tabs":
+        st.markdown(
+            """
 ### Linhagem dos dados
 
 `data/load_from_modl.py` lê três abas do arquivo Bloomberg MODL (`Multiple
@@ -707,7 +767,57 @@ só que sensibilizando Risk-Free/Beta em vez do WACC direto).
 `sensitivity.py` não reproduz nenhuma dessas inconsistências: ele sempre
 chama `dcf_engine.run_dcf()`, então qualquer célula de qualquer grid aqui
 é diretamente comparável ao preço-alvo do DCF mostrado na aba Sumário.
+            """
+        )
+    else:
+        st.markdown(
+            """
+### Linhagem dos dados
 
+Essa empresa não tem abas `DCF`/`WACC` prontas no arquivo Bloomberg MODL —
+esse é o caso normal de um export bruto. `data/load_from_modl.py` lê só a
+aba `Multiple Periods` (históricos e consenso) e recebe um pequeno conjunto
+de inputs de mercado no momento do upload (preço da ação, beta, risk-free
+rate, equity risk premium). A partir disso ele mesmo calcula premissas de
+cenário, WACC e múltiplo terminal — nada é extraído de uma aba pronta, é
+calculado por este projeto (ver `derive_scenario_assumptions()` em
+`data/load_from_modl.py`). Tudo é gravado em `data/valuation.db` seguindo o
+mesmo schema de sempre: `companies`, `historicals`, `wacc_inputs`,
+`scenario_assumptions`, `terminal_assumptions`, `trading_comps` (vazia —
+sem abas DCF/WACC não há bloco "TRADING MULTIPLES" para ler, então P/E e
+PEG ficam indisponíveis, ver aba Sumário).
+
+Todos os números desta página vêm dessas tabelas via `dcf_engine.py`,
+`target_price.py` e `sensitivity.py` — nada é recalculado aqui na interface.
+
+### Como as premissas de cenário são derivadas
+
+- **Crescimento de receita**: usa o consenso de mercado (`historicals`) nos
+  anos em que ele existe e depois faz um fade linear até a taxa terminal
+  (3% ao ano) nos anos seguintes — ver `fade_to_terminal()`.
+- **Margem EBIT, alíquota efetiva, D&A % receita, capex % receita, NWC %
+  Δreceita**: média dos últimos anos reais (`period_type = 'actual'`),
+  mantida constante daí para frente.
+- **Bear/Bull**: multiplicam o crescimento por 0.7x/1.3x e deslocam a
+  margem EBIT em -3pp/+2pp em relação ao caso base — um envelope mecânico
+  em cima do caso derivado, não premissas de um analista.
+- **Múltiplo terminal (EV/EBITDA)**: o EV/EBITDA implícito de mercado hoje
+  (`(market cap + dívida líquida) / EBITDA ajustado` do último ano real) é
+  usado como base, com bear/bull em 0.85x/1.15x desse valor.
+- **WACC**: CAPM padrão (Rf + beta × ERP) para custo de equity; custo de
+  dívida pré-imposto = despesa de juros / dívida bruta do último ano real,
+  ajustado pela alíquota efetiva; pesos de capital a valor de mercado
+  (market cap e dívida líquida).
+
+Como não existe um DCF/WACC de referência da própria empresa para comparar
+contra, não há um "achado" de inconsistência aqui — o objetivo dessas
+premissas é ser uma primeira aproximação formulaica e razoável a partir dos
+históricos, não reproduzir uma planilha específica.
+            """
+        )
+
+    st.markdown(
+        """
 ### Onde está cada cálculo no código
 
 | Nesta página | Função |
@@ -721,8 +831,17 @@ chama `dcf_engine.run_dcf()`, então qualquer célula de qualquer grid aqui
 | Sensibilidade WACC × Múltiplo | `sensitivity.sensitivity_wacc_exit_multiple()` |
 | Sensibilidade Crescimento × Margem | `sensitivity.sensitivity_growth_margin()` |
 | Sensibilidade Risk-Free × Beta | `sensitivity.sensitivity_beta_risk_free()` |
-
-Leitura completa dos dois achados, com as fórmulas originais do Excel
-citadas célula a célula, está em `README.md` no repositório.
         """
     )
+    if company["data_source"] == "modl_tabs":
+        st.markdown(
+            "Leitura completa dos dois achados, com as fórmulas originais do Excel "
+            "citadas célula a célula, está em `README.md` no repositório."
+        )
+    else:
+        st.markdown(
+            "Detalhes de implementação completos de como as premissas, o WACC e o "
+            "múltiplo terminal são calculados estão em `data/load_from_modl.py` "
+            "(`derive_scenario_assumptions()`, `load_workbook_data()`) e no "
+            "`README.md`."
+        )

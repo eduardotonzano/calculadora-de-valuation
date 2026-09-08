@@ -289,8 +289,8 @@ def print_summary(result: dict) -> None:
     )
     if result["explicit_years"] < result["total_projected_years"]:
         print(
-            f"  NOTE: source template projects {result['total_projected_years']} years but "
-            f"only sums the first {result['explicit_years']} for valuation — see README.md"
+            f"  NOTE: {result['total_projected_years']} years are projected but only the "
+            f"first {result['explicit_years']} are summed for valuation — see README.md"
         )
     print(f"  Sum of PV of UFCF: ${result['sum_pv_ufcf']:,.1f}M")
     print(

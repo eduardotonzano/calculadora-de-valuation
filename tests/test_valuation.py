@@ -13,19 +13,20 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 import openpyxl
 import pytest
 
-from data.load_from_modl import load_workbook_data
+from data.load_from_modl import derive_scenario_assumptions, load_workbook_data, write_to_db
 from dcf_engine import get_company_id, get_wacc, run_dcf
 from sensitivity import (
     sensitivity_beta_risk_free,
     sensitivity_growth_margin,
     sensitivity_wacc_exit_multiple,
 )
-from target_price import from_ev_ebitda, from_pe, from_peg
+from target_price import football_field, from_ev_ebitda, from_pe, from_peg
 
 DB_PATH = Path(__file__).parent.parent / "data" / "valuation.db"
 TICKER = "APP US"
@@ -254,17 +255,189 @@ def test_sensitivity_beta_risk_free_center_cell_matches_dcf(conn):
 
 # ------------------------------------------- load_from_modl() sheet check --
 
-def test_load_workbook_data_rejects_missing_sheets(tmp_path):
-    """Found by testing against a real second company's Bloomberg export
-    (Blackstone) that only had a 'Multiple Periods' tab: without this
-    check, openpyxl's own bare KeyError ('Worksheet DCF does not exist.')
-    reached the user with no explanation of what's actually missing or why
-    it matters. Built here as a minimal synthetic workbook rather than
-    committing a real third-party Bloomberg export."""
+def test_load_workbook_data_rejects_missing_multiple_periods_sheet(tmp_path):
+    wb = openpyxl.Workbook()
+    wb.active.title = "Some Other Sheet"
+    path = tmp_path / "no_multiple_periods.xlsx"
+    wb.save(path)
+
+    with pytest.raises(ValueError, match="Multiple Periods"):
+        load_workbook_data(path)
+
+
+def test_load_workbook_data_mode_b_requires_market_data(tmp_path):
+    """A workbook with only 'Multiple Periods' (no DCF/WACC tabs) is the
+    normal shape of a raw Bloomberg export (confirmed against a real second
+    company, Blackstone) -- Mode B. CAPM/market inputs (risk-free rate,
+    beta, ERP, stock price) are never in a financials export, so
+    load_workbook_data() must refuse to guess them and say exactly what's
+    missing rather than silently defaulting or crashing with a bare
+    openpyxl KeyError."""
     wb = openpyxl.Workbook()
     wb.active.title = "Multiple Periods"
     path = tmp_path / "historicals_only.xlsx"
     wb.save(path)
 
-    with pytest.raises(ValueError, match="DCF.*WACC|WACC.*DCF"):
+    with pytest.raises(ValueError, match="market_data"):
         load_workbook_data(path)
+
+
+# --------------------------------------- Mode B: derive_scenario_assumptions --
+
+FIRST_ACTUAL_YEAR = 2021
+YEARS = list(range(FIRST_ACTUAL_YEAR, FIRST_ACTUAL_YEAR + 10))  # 4 actual + 6 estimate
+ACTUAL_YEARS = YEARS[:4]
+REVENUES = [1000 * (1.1 ** i) for i in range(10)]
+
+
+def _synthetic_historicals() -> list[dict]:
+    """10 years of made-up-but-internally-consistent historicals: 20% EBIT
+    margin, 5% D&A, 2% interest expense, 21% tax rate, all as a share of
+    revenue, and constant 10% revenue growth throughout -- deterministic
+    enough to assert exact derived numbers against."""
+    records = []
+    for i, year in enumerate(YEARS):
+        revenue = REVENUES[i]
+        ebit = revenue * 0.2
+        da = revenue * 0.05
+        interest_expense = revenue * 0.02
+        pretax_income = ebit - interest_expense
+        tax_expense = pretax_income * 0.21
+        records.append({
+            "fiscal_year": year,
+            "period_type": "actual" if year in ACTUAL_YEARS else "estimate",
+            "revenue": revenue,
+            "ebit": ebit,
+            "ebitda_adjusted": ebit + da,
+            "da": da,
+            "interest_expense": interest_expense,
+            "pretax_income": pretax_income,
+            "tax_expense": tax_expense,
+            "net_income": pretax_income - tax_expense,
+            "eps_diluted_adjusted": (pretax_income - tax_expense) / 100,
+            "long_term_debt": 500.0,
+            "net_debt": 500.0,
+            "capex": -revenue * 0.05,
+            "nwc_change": 0.0,
+            "shares_diluted": 100.0,
+        })
+    return records
+
+
+def test_derive_scenario_assumptions_growth_matches_consensus_then_fades():
+    scenarios = derive_scenario_assumptions(_synthetic_historicals())
+    base = scenarios["base"]
+    assert len(base) == 13
+    # 6 estimate years (2025-2030) all grew 10% over the prior year -- the
+    # known/consensus part of the fade should reproduce that exactly.
+    for year_data in base[:6]:
+        assert year_data["revenue_growth"] == pytest.approx(0.1)
+    # The last of the 7 faded years lands exactly on the terminal rate.
+    assert base[-1]["revenue_growth"] == pytest.approx(0.03)
+    # Trailing-average margins/rates, held flat across every year.
+    for year_data in base:
+        assert year_data["ebit_margin"] == pytest.approx(0.2)
+        assert year_data["tax_rate"] == pytest.approx(0.21)
+        assert year_data["da_pct_revenue"] == pytest.approx(0.05)
+        assert year_data["capex_pct_revenue"] == pytest.approx(0.05)
+        assert year_data["nwc_pct_delta_revenue"] == pytest.approx(0.0)
+
+
+def test_derive_scenario_assumptions_bear_bull_envelope():
+    scenarios = derive_scenario_assumptions(_synthetic_historicals())
+    base, bear, bull = scenarios["base"], scenarios["bear"], scenarios["bull"]
+    assert bear[0]["revenue_growth"] == pytest.approx(base[0]["revenue_growth"] * 0.7)
+    assert bull[0]["revenue_growth"] == pytest.approx(base[0]["revenue_growth"] * 1.3)
+    assert bear[0]["ebit_margin"] == pytest.approx(base[0]["ebit_margin"] - 0.03)
+    assert bull[0]["ebit_margin"] == pytest.approx(base[0]["ebit_margin"] + 0.02)
+
+
+# ------------------------------------- Mode B: load_workbook_data end-to-end --
+
+def _build_mode_b_workbook(path: Path) -> None:
+    """A minimal synthetic 'Multiple Periods'-only workbook (no DCF/WACC
+    tabs), shaped like a real raw Bloomberg MODL export, using the same
+    field-code layout _synthetic_historicals() mirrors as plain dicts."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Multiple Periods"
+    ws["A1"] = "Synthetic Test Corp (TEST)"
+    ws["A2"] = "TEST US Equity"
+
+    field_rows = {
+        "IS_COMP_SALES": "revenue",
+        "IS_COMPARABLE_EBIT": "ebit",
+        "IS_COMPARABLE_EBITDA": "ebitda_adjusted",
+        "CF_DEPR_AMORT": "da",
+        "IS_NET_INTEREST_EXPENSE": "interest_expense",
+        "PRETAX_INC": "pretax_income",
+        "IS_INC_TAX_EXP": "tax_expense",
+        "IS_COMP_NET_INCOME_GAAP": "net_income",
+        "IS_COMP_EPS_ADJUSTED_OLD": "eps_diluted_adjusted",
+        "CB_BS_LT_BORROWING": "long_term_debt",
+        "CB_CF_PURCHASES_OF_PPE": "capex",
+        "IS_SH_FOR_DILUTED_EPS": "shares_diluted",
+    }
+    cols = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]
+    for row, (code, key) in enumerate(field_rows.items(), start=10):
+        ws[f"B{row}"] = code
+        for col, record in zip(cols, _synthetic_historicals()):
+            ws[f"{col}{row}"] = record[key]
+
+    for col, record, year in zip(cols, _synthetic_historicals(), YEARS):
+        ws[f"{col}3"] = "FY Rep" if record["period_type"] == "actual" else "FY Fwd"
+        ws[f"{col}4"] = date(year, 12, 31)
+
+    wb.save(path)
+
+
+def test_load_workbook_data_mode_b_computes_from_historicals(tmp_path):
+    path = tmp_path / "mode_b.xlsx"
+    _build_mode_b_workbook(path)
+    market_data = {"risk_free_rate": 0.04, "beta": 1.2, "equity_risk_premium": 0.05, "stock_price": 50.0}
+
+    data = load_workbook_data(path, market_data=market_data)
+
+    assert data["ticker"] == "TEST US"
+    assert data["name"] == "Synthetic Test Corp"
+    assert data["data_source"] == "derived"
+    assert data["trading_comps"] == []
+    assert data["wacc_inputs"] == {
+        "risk_free_rate": 0.04,
+        "beta": 1.2,
+        "equity_risk_premium": 0.05,
+        "stock_price": 50.0,
+        "shares_outstanding": 100.0,
+    }
+    # Latest actual year (2024): revenue 1331, EBITDA 1331*0.25=332.75,
+    # net_debt 500, market_cap 50*100=5000.
+    expected_ev_ebitda = (5000 + 500) / 332.75
+    assert data["terminal_multiples"]["base"] == pytest.approx(expected_ev_ebitda)
+    assert data["terminal_multiples"]["bear"] == pytest.approx(expected_ev_ebitda * 0.85)
+    assert data["terminal_multiples"]["bull"] == pytest.approx(expected_ev_ebitda * 1.15)
+    assert len(data["scenarios"]["base"]) == 13
+
+
+def test_mode_b_company_round_trips_through_db_and_football_field(tmp_path):
+    """End-to-end: a derived (Mode B) company writes to a fresh db and
+    dcf_engine/target_price can price it -- P/E is unavailable (no
+    trading_comps) but DCF, EV/EBITDA and PEG still work, mirroring what
+    football_field() showed for the real Blackstone file."""
+    xlsx_path = tmp_path / "mode_b.xlsx"
+    _build_mode_b_workbook(xlsx_path)
+    market_data = {"risk_free_rate": 0.04, "beta": 1.2, "equity_risk_premium": 0.05, "stock_price": 50.0}
+    data = load_workbook_data(xlsx_path, market_data=market_data)
+
+    db_path = tmp_path / "mode_b.db"
+    schema_path = Path(__file__).parent.parent / "data" / "schema.sql"
+    write_to_db(db_path, schema_path, data)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        results = football_field(conn, "TEST US", "base")
+        methods = {r["method"] for r in results}
+        assert methods == {"DCF", "EV/EBITDA", "PEG"}
+        with pytest.raises(ValueError):
+            from_pe(conn, "TEST US", target_year=2027)
+    finally:
+        conn.close()

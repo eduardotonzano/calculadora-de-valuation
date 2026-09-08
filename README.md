@@ -1,22 +1,32 @@
 # Calculadora de Valuation
 
 Ferramenta para gerar teses de investimento buy-side: DCF com valor
-terminal por perpetuidade, e target price por múltiplos de mercado
-(EV/EBITDA, P/E, PEG). Os dados de origem são exportações do template
-Bloomberg MODL (`.xlsx`), carregadas em um banco SQLite.
+terminal por perpetuidade, WACC por CAPM, e target price por múltiplos de
+mercado (EV/EBITDA, P/E, PEG). Os dados de origem são exportações do
+template Bloomberg MODL (`.xlsx`), carregadas em um banco SQLite.
+
+O core do projeto é **calcular** DCF/WACC/perpetuidade, não só ler
+premissas prontas: a maioria dos exports Bloomberg reais só traz
+históricos e consenso de mercado (aba `Multiple Periods`), sem nenhuma
+aba de DCF ou WACC pronta — isso é um artefato manual, não algo que o
+Bloomberg exporta. Quando o arquivo não tem essas abas, `data/load_from_modl.py`
+deriva ele mesmo as premissas de cenário, o WACC e o múltiplo terminal a
+partir dos históricos + um punhado de inputs de mercado (preço, beta,
+risk-free rate, ERP) — ver "Duas fontes de dados: `modl_tabs` vs.
+`derived`" abaixo.
 
 ## Status atual
 
 | Componente | Status |
 |---|---|
 | `data/schema.sql` | Pronto |
-| `data/load_from_modl.py` | Pronto, validado contra o `.xlsx` original da AppLovin |
-| `data/valuation.db` | Populado com AppLovin (APP US) |
-| `dcf_engine.py` | Pronto, output validado célula a célula ($388.54 no caso base) |
-| `target_price.py` | Pronto — `from_ev_ebitda()`, `from_pe()`, `from_peg()` |
+| `data/load_from_modl.py` | Pronto — extrai (Modo A) ou calcula (Modo B) DCF/WACC/perpetuidade, ver seção abaixo |
+| `data/valuation.db` | Populado com AppLovin (APP US, Modo A) |
+| `dcf_engine.py` | Pronto, output validado célula a célula ($388.54 no caso base da AppLovin) |
+| `target_price.py` | Pronto — `from_ev_ebitda()`, `from_pe()`, `from_peg()`, degrada graciosamente quando um método não tem dado suficiente |
 | `sensitivity.py` | Pronto — tabelas WACC × múltiplo, crescimento × margem, e risk-free × beta |
-| `app.py` (Streamlit) | Pronto — abre todos os cálculos, não só o resultado final |
-| `tests/test_valuation.py` + CI | Pronto — 23 testes `pytest`, rodando no GitHub Actions a cada push/PR |
+| `app.py` (Streamlit) | Pronto — abre todos os cálculos, não só o resultado final; upload calcula tudo, inclusive DCF/WACC quando o arquivo não os traz |
+| `tests/test_valuation.py` + CI | Pronto — 28 testes `pytest`, rodando no GitHub Actions a cada push/PR |
 
 Rode para confirmar que tudo está funcionando:
 
@@ -26,13 +36,80 @@ python dcf_engine.py data/valuation.db "APP US" base
 # ... Price per share: $388.54
 python target_price.py data/valuation.db "APP US" base
 
-# suite de regressão (23 testes) — cobre o caso base, os limites de
-# explicit_years, a lacuna de cobertura do P/E e o isolamento multi-empresa
+# suite de regressão (28 testes) — cobre o caso base, os limites de
+# explicit_years, a lacuna de cobertura do P/E, o isolamento multi-empresa
+# e a derivação de premissas do Modo B
 pip install -r requirements-dev.txt
 pytest
 ```
 
+## Duas fontes de dados: `modl_tabs` vs. `derived`
+
+Este projeto começou a partir de um arquivo Bloomberg MODL da AppLovin
+que tinha abas `DCF` e `WACC` prontas, com premissas de cenário
+(Bear/Base/Bull), múltiplo de saída e inputs de CAPM já preenchidos à
+mão. Era natural supor que isso fosse o formato normal de um export
+Bloomberg — mas essas abas eram trabalho manual feito especificamente
+para a AppLovin, não algo que o Bloomberg gera. Testando o upload com um
+segundo arquivo real (Blackstone, BX US), ficou claro que o formato
+normal de um export bruto do MODL só tem **uma** aba, `Multiple Periods`
+(históricos + consenso de mercado) — sem `DCF` nem `WACC`.
+
+Como o core deste projeto é calcular DCF/WACC/perpetuidade de forma
+rápida e correta — não só ler premissas que alguém já montou —
+`data/load_from_modl.py` detecta qual dos dois formatos o arquivo tem e
+segue um de dois caminhos, gravados em `companies.data_source`:
+
+- **`modl_tabs`** (abas `DCF`/`WACC` presentes): extrai as premissas
+  manuais verbatim, exatamente como antes. É o caminho pelo qual o
+  preço-alvo de $388.54 da AppLovin foi validado célula a célula, e
+  continua **sem nenhuma mudança de comportamento**.
+- **`derived`** (só `Multiple Periods`, o caso normal): `data/load_from_modl.py`
+  calcula tudo sozinho a partir dos históricos:
+  - **Crescimento de receita**: usa o consenso de mercado enquanto ele
+    existe e depois faz um fade linear até uma taxa terminal de 3% ao
+    ano (`fade_to_terminal()`) — uma proxy padrão de crescimento nominal
+    de longo prazo.
+  - **Margem EBIT, alíquota efetiva, D&A%, CapEx%, NWC%**: média dos
+    últimos anos reportados, mantida constante daí para frente.
+  - **Bear/Bull**: um envelope mecânico e documentado em cima do caso
+    base — crescimento ×0.7/×1.3, margem EBIT −3pp/+2pp — não são
+    premissas de um analista, é uma forma transparente de gerar uma
+    faixa de sensibilidade quando não existe uma tabela de cenários
+    pronta para ler.
+  - **Múltiplo terminal (EV/EBITDA)**: o múltiplo EV/EBITDA implícito de
+    mercado hoje — `(market cap + dívida líquida) / EBITDA ajustado` do
+    último ano reportado — usado como base, com bear/bull em
+    0.85x/1.15x desse valor.
+  - **WACC**: CAPM padrão (Rf + beta × ERP) para custo de equity; o
+    custo de dívida e a estrutura de capital continuam vindo de
+    `dcf_engine.get_wacc()`, como no Modo A.
+
+  Os inputs de CAPM (risk-free rate, beta, equity risk premium, preço da
+  ação) **nunca** aparecem num export de dados financeiros do Bloomberg
+  — são dado de mercado, não dado da empresa — então `load_workbook_data()`
+  exige que sejam passados explicitamente via `market_data` e levanta um
+  `ValueError` claro se faltar algum, em vez de inventar um valor. Na
+  interface Streamlit, o upload de um arquivo sem abas `DCF`/`WACC`
+  mostra um formulário pedindo esses quatro números antes de calcular
+  qualquer coisa.
+
+  Como não há abas `DCF`/`WACC` de onde extrair o bloco "TRADING
+  MULTIPLES", `trading_comps` fica vazio para uma empresa `derived` —
+  os métodos `from_pe()`/`from_peg()` de `target_price.py` que dependem
+  de múltiplo de P/E de mercado degradam graciosamente (ver
+  `football_field()`).
+
+`app.py` lê `companies.data_source` para não descrever o arquivo de uma
+empresa `derived` como se tivesse os mesmos problemas do arquivo
+manualmente construído da AppLovin (ver "Descoberta importante" e
+"Segunda descoberta" abaixo, que são específicas do Modo A).
+
 ## Descoberta importante: inconsistência de 5 vs. 13 anos de projeção explícita
+
+*(Específico do Modo A — a aba `DCF` manual da AppLovin. Uma empresa
+`derived`, como a Blackstone, não tem essa aba nem esse problema — ver
+"Duas fontes de dados" acima.)*
 
 O template Bloomberg MODL original (aba `DCF`) monta uma projeção
 explícita de **13 anos** (FY2026E–FY2038E): os primeiros 5 anos
@@ -78,6 +155,9 @@ alegar "13 anos de projeção explícita" numa tese enquanto o número
 usado na prática só reflete 5.
 
 ## Segunda descoberta: as três tabelas de sensibilidade do arquivo original nem concordam entre si
+
+*(Também específico do Modo A/AppLovin — sem uma aba `DCF` manual não há
+tabelas de sensibilidade da própria planilha para comparar.)*
 
 Ao construir `sensitivity.py` reproduzindo as tabelas "SENSITIVITY 1:
 WACC vs. TERMINAL EXIT MULTIPLE" (linhas 92–98), "SENSITIVITY 2: REVENUE
@@ -125,31 +205,41 @@ originais que é internamente consistente.
 
 ## Estrutura de dados (`data/schema.sql`)
 
-- **companies** — ticker, nome, moeda, data-base ("as of" do Bloomberg).
+- **companies** — ticker, nome, moeda, data-base ("as of" do Bloomberg), e
+  `data_source` (`modl_tabs` ou `derived` — ver "Duas fontes de dados"
+  acima; `app.py` usa essa coluna para não descrever o arquivo de uma
+  empresa `derived` como se tivesse os problemas do Modo A).
 - **historicals** — receita, EBIT, EBITDA ajustado, D&A, despesa de juros,
   lucro antes de impostos, impostos, lucro líquido, EPS diluído ajustado,
   dívida de longo prazo, dívida líquida, capex, variação de capital de
-  giro — um registro por ano fiscal, `period_type` = `actual` (reportado)
-  ou `estimate` (consenso Bloomberg, disponível só para FY2026E–FY2030E).
+  giro, ações diluídas — um registro por ano fiscal, `period_type` =
+  `actual` (reportado) ou `estimate` (consenso Bloomberg). Único dado que
+  toda empresa tem, `modl_tabs` ou `derived` — é a partir daqui que o
+  Modo B deriva tudo o mais.
 - **wacc_inputs** — inputs de CAPM e mercado (risk-free, beta, ERP, preço
-  da ação, ações em circulação). Custo de dívida e estrutura de capital
-  são derivados em `dcf_engine.get_wacc()` a partir do último ano
-  reportado em `historicals`, para não duplicar dado.
+  da ação, ações em circulação). No Modo A vêm da aba `WACC` manual; no
+  Modo B vêm do `market_data` fornecido no upload/CLI. Custo de dívida e
+  estrutura de capital são derivados em `dcf_engine.get_wacc()` a partir
+  do último ano reportado em `historicals` nos dois modos, para não
+  duplicar dado.
 - **scenario_assumptions** — premissas ano a ano (13 anos) para os casos
   `bear`/`base`/`bull`: crescimento de receita, margem EBIT, alíquota de
   imposto, D&A% e CapEx% da receita, impacto de NWC% sobre a variação de
-  receita.
-- **terminal_assumptions** — múltiplo de saída EV/EBITDA por cenário
-  (8x/14x/18x). É o único input explícito de valor terminal no arquivo
-  original; a taxa de crescimento na perpetuidade (Gordon Growth) não é
-  um input — é uma taxa implícita que `dcf_engine.py` calcula a partir do
-  valor terminal por múltiplo de saída (cross-check "TERMINAL VALUE
-  CROSS-CHECK" do arquivo original).
+  receita. Extraídas da aba `DCF` manual (Modo A) ou calculadas por
+  `derive_scenario_assumptions()` a partir de `historicals` (Modo B).
+- **terminal_assumptions** — múltiplo de saída EV/EBITDA por cenário. No
+  Modo A é o único input explícito de valor terminal do arquivo original
+  (8x/14x/18x para a AppLovin); no Modo B é o múltiplo EV/EBITDA
+  implícito de mercado hoje (ver "Duas fontes de dados" acima). Nos dois
+  casos, a taxa de crescimento na perpetuidade (Gordon Growth) não é um
+  input — é uma taxa implícita que `dcf_engine.py` calcula a partir do
+  valor terminal por múltiplo de saída.
 - **trading_comps** — múltiplos de mercado atuais (P/E, EV/EBITDA, FCF
-  yield, PEG para FY2027E e FY2030E), extraídos diretamente do bloco
-  "TRADING MULTIPLES" da aba `DCF`. Não são comparáveis de pares
-  fabricados — é o que o arquivo original já calcula sobre a própria
-  AppLovin, usado como referência de múltiplo de mercado.
+  yield, PEG para FY2027E e FY2030E). No Modo A, extraídos diretamente do
+  bloco "TRADING MULTIPLES" da aba `DCF` — não são comparáveis de pares
+  fabricados, é o que o próprio arquivo já calcula. No Modo B fica vazio
+  (sem aba `DCF` não há esse bloco para ler), e `target_price.py` degrada
+  os métodos que dependem dele em vez de fabricar um múltiplo.
 
 ## Padrão de código
 
@@ -193,7 +283,13 @@ crescimento × margem) — parâmetros adicionados a `run_dcf()` e
 pip install -r requirements.txt
 
 # (re)carregar o banco a partir de um .xlsx Bloomberg MODL
+# Modo A: arquivo já tem abas DCF/WACC (ex.: AppLovin) — nada mais é necessário.
 python data/load_from_modl.py <caminho-para-MODL.xlsx> data/valuation.db
+
+# Modo B: arquivo só tem 'Multiple Periods' (o caso normal, ex.: Blackstone) —
+# passe os inputs de CAPM/mercado explicitamente.
+python data/load_from_modl.py <caminho-para-MODL.xlsx> data/valuation.db \
+    --risk-free-rate 0.0410 --beta 1.45 --erp 0.0450 --stock-price 168.50
 
 # DCF
 python dcf_engine.py data/valuation.db "APP US" base
@@ -217,8 +313,10 @@ Camada de exibição pura sobre `dcf_engine.py`, `target_price.py` e
 que essas três funções já devolvem. Organizada em abas para abrir os
 cálculos em vez de só mostrar o resultado final:
 
-- **Sumário** — preço-alvo, WACC, g implícito, football field, e os dois
-  achados documentados acima em destaque.
+- **Sumário** — preço-alvo, WACC, g implícito, football field, e (só para
+  empresas `modl_tabs`) os dois achados documentados acima em destaque;
+  para uma empresa `derived`, mostra em vez disso como as premissas/WACC/
+  múltiplo terminal foram calculados.
 - **WACC** — CAPM, custo de dívida e estrutura de capital linha a linha,
   com a fórmula de cada componente ao lado do valor.
 - **Projeção & FCF** — a tabela de 13 anos completa (receita, EBIT, NOPAT,
@@ -232,11 +330,15 @@ cálculos em vez de só mostrar o resultado final:
 - **Múltiplos** — `from_ev_ebitda()`, `from_pe()`, `from_peg()`, cada um
   com fórmula + inputs + resultado.
 - **Sensibilidade** — os três heatmaps (WACC × múltiplo, crescimento ×
-  margem, risk-free × beta) mais a grade em números, e a tabela comparando
-  os preços-alvo divergentes que a própria planilha original produz em
-  "caso base" (C87/D96/D110/D124 — ver "Segunda descoberta" acima).
-- **Metodologia** — a linhagem dos dados e os dois achados por extenso,
-  com a tabela de "onde está cada cálculo no código".
+  margem, risk-free × beta) mais a grade em números; para uma empresa
+  `modl_tabs`, também a tabela comparando os preços-alvo divergentes que
+  a própria planilha original produz em "caso base" (C87/D96/D110/D124 —
+  ver "Segunda descoberta" acima); para uma empresa `derived`, uma nota
+  explicando que não há arquivo original para comparar contra.
+- **Metodologia** — a linhagem dos dados; para `modl_tabs`, os dois
+  achados por extenso; para `derived`, como cada premissa/WACC/múltiplo
+  terminal é calculado; nos dois casos, a tabela de "onde está cada
+  cálculo no código".
 
 Um detalhe de implementação que rendeu um bug real ao construir os
 heatmaps: o Plotly, ao receber rótulos de eixo com "%" (ex.: `"9.81%"`),
@@ -297,8 +399,9 @@ externos foram implementadas:
   com código 1 em vez de um traceback cru para ticker/banco inexistente
   ou parâmetros inválidos.
 - **CI no GitHub Actions** (`.github/workflows/tests.yml`) rodando a cada
-  push/PR: compila todos os módulos, roda os 23 testes de
-  `tests/test_valuation.py`, e faz um smoke test das três CLIs contra o
+  push/PR: compila todos os módulos, roda os testes de
+  `tests/test_valuation.py` (28 no momento, incluindo os do Modo B), e
+  faz um smoke test das três CLIs contra o
   `data/valuation.db` versionado. Os bugs desta revisão só tinham sido
   achados porque testei manualmente depois do fato — agora regressões
   seriam pegas automaticamente.
@@ -318,27 +421,53 @@ externos foram implementadas:
   local de uma pessoa só continua carregando `data/valuation.db`
   diretamente).
 
-## Testado com uma segunda empresa real
+## Testado com uma segunda empresa real — e o que isso revelou
 
-O item que tinha ficado de fora por depender de dado externo foi
-fechado: testei o upload com o export Bloomberg MODL de uma segunda
-empresa real (Blackstone, BX US). O resultado já valeu a pena — esse
-arquivo só tinha a aba `Multiple Periods` (sem `DCF` nem `WACC`), e
-`load_workbook_data()` acessava `wb["DCF"]`/`wb["WACC"]` direto, sem
-checar se existiam. O usuário via um `KeyError` cru do openpyxl
-("Worksheet DCF does not exist.") na barra lateral — não quebrava o app
-(o `try/except` do upload já cobria isso), mas não explicava nada.
+Testar o upload com o export Bloomberg MODL de uma segunda empresa real
+(Blackstone, BX US) mudou o entendimento do projeto. Minha primeira
+reação, quando esse arquivo só trouxe a aba `Multiple Periods` (sem
+`DCF` nem `WACC`), foi tratar isso como um arquivo incompleto: o parser
+acessava `wb["DCF"]`/`wb["WACC"]` direto sem checar se existiam, o
+usuário via um `KeyError` cru do openpyxl na barra lateral, e a correção
+inicial foi só levantar um `ValueError` mais claro dizendo que essas
+abas faltavam — tratando a ausência delas como erro.
 
-Agora `load_workbook_data()` confere as três abas logo no início e
-levanta um `ValueError` claro dizendo quais faltam e por quê ("historicals
-sozinho não é suficiente para rodar dcf_engine.py/target_price.py/
-sensitivity.py"). Coberto por um teste com uma planilha sintética mínima
-(`tests/test_valuation.py`), sem precisar versionar o arquivo real de
-terceiros no repositório.
+Isso estava invertido. As abas `DCF`/`WACC` do arquivo da AppLovin eram
+um artefato manual construído especificamente para aquela tese de
+investimento — não algo que o Bloomberg exporta. O arquivo da Blackstone,
+só com `Multiple Periods`, é o formato *normal* de um export bruto do
+MODL. Ou seja: o core deste projeto nunca foi "ler o DCF/WACC que
+alguém já montou" — é **calcular** DCF, WACC e perpetuidade a partir dos
+dados brutos, rápido e corretamente, para qualquer empresa que só tenha
+históricos e consenso de mercado.
 
-De quebra, essa segunda empresa confirmou que o parser já era robusto a
-uma variação real que a AppLovin não tinha: a BX só tem 4 anos de
-consenso (FY2026E–FY2029E) contra 5 da AppLovin, e a fronteira
-"Fwd"/"Rep" cai numa coluna diferente (`I` em vez de `J`) — `load_from_modl.py`
-já lê isso dinamicamente pelo rótulo de cada coluna (`period_type_for_column()`),
-não por posição fixa, então essa parte funcionou sem nenhuma mudança.
+Isso motivou a reescrita descrita em "Duas fontes de dados" acima:
+`data/load_from_modl.py` agora trata "só `Multiple Periods`" como o
+caminho normal (Modo `derived`), calculando premissas de cenário, WACC e
+múltiplo terminal ele mesmo (`derive_scenario_assumptions()`), e mantém
+o caminho antigo (Modo `modl_tabs`) intacto para arquivos que já trazem
+essas abas prontas — sem regressão no preço-alvo de $388.54 da AppLovin,
+confirmado por teste de regressão exato. `data/valuation.db` continua
+populado só com a AppLovin; o arquivo da Blackstone não foi versionado
+no repositório (dado de terceiros), mas o caminho `derived` que ele
+expôs está coberto por testes com uma planilha sintética mínima
+(`tests/test_valuation.py`).
+
+De quebra, essa segunda empresa confirmou duas coisas sobre a robustez
+do parser:
+
+- **Códigos de campo Bloomberg não são estáveis entre templates.**
+  `IS_COMP_PTP_EX_STK_BASED_COMP` significa "lucro antes de impostos"
+  para a AppLovin, mas para a Blackstone (uma gestora de ativos
+  alternativos) é um conceito ajustado diferente ("Segment Distributable
+  Earnings"). `historicals` agora é montado a partir de uma cadeia de
+  aliases por conceito, priorizando o código Bloomberg mais universal
+  (ex.: `PRETAX_INC`, presente na BX e ausente na AppLovin) — os dois
+  arquivos resolvem para o valor certo sem mudança de comportamento para
+  a AppLovin.
+- **O parser já era robusto a variações estruturais reais** que a
+  AppLovin não tinha: a BX só tem 4 anos de consenso (FY2026E–FY2029E)
+  contra 5 da AppLovin, e a fronteira "Fwd"/"Rep" cai numa coluna
+  diferente (`I` em vez de `J`) — `load_from_modl.py` já lê isso
+  dinamicamente pelo rótulo de cada coluna (`period_type_for_column()`),
+  não por posição fixa, então essa parte funcionou sem nenhuma mudança.
