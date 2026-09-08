@@ -553,3 +553,42 @@ desambiguação por profundidade (dois rótulos "Net Income" idênticos em
 níveis de indentação diferentes, só um deles correto) e um para o
 fallback de "Changes in Working Capital" quando essa linha vem em branco
 mas as linhas-filhas por baixo dela têm valor.
+
+## `interest_expense` virou opcional (mais um código de campo variável)
+
+Um quarto arquivo real quebrou o upload com `Could not find any known
+Bloomberg field code for ['interest_expense']` — o código de campo dessa
+planilha para despesa de juros não batia com nenhum dos três alias
+conhecidos. Igual ao achado da Blackstone/Alphabet, o código de campo para
+esse conceito varia mais entre templates do que qualquer outro. Em vez de
+seguir caçando alias por alias a cada novo arquivo real, `interest_expense`
+virou **opcional**: a lista de aliases foi ampliada, e quando nenhum bate,
+o valor grava como `0.0` em vez de derrubar o upload inteiro — o custo de
+dívida de `dcf_engine.get_wacc()` fica 0% para essa empresa nesse caso
+(melhor um número explicitamente conservador e sinalizado do que travar a
+ferramenta inteira por um campo que a maioria dos templates chama de um
+jeito diferente).
+
+## Preenchimento automático de dados de mercado (yfinance)
+
+Para uma empresa sem abas DCF/WACC (Modo `derived`), a barra lateral agora
+tem um campo de ticker — escolha um nome da lista curada (S&P 500 e outros
+grandes nomes de NYSE/NASDAQ, mais Ibovespa, em `data/tickers.csv`) ou
+digite qualquer ticker real — e um botão que busca preço atual e beta no
+Yahoo Finance (`yfinance`) e a taxa do Treasury de 10 anos (`^TNX`),
+preenchendo os 4 campos de mercado sozinho. O Equity Risk Premium continua
+um valor estático documentado (não existe uma API gratuita de ERP ao
+vivo — é uma estimativa periódica da pesquisa do Damodaran, não uma
+cotação de mercado). Quando beta ou o Treasury não vêm no retorno do
+Yahoo, o app avisa exatamente qual campo ficou com um valor padrão em vez
+de preencher silenciosamente. Preenchimento manual continua funcionando
+igual, para quem não quer depender de uma API externa.
+
+Importante: `data/tickers.csv` é uma lista curada de ~90 tickers
+conhecidos, não um cadastro completo de todas as empresas listadas em
+NYSE/NASDAQ/Ibovespa — um diretório completo (milhares de tickers) exigiria
+acesso a fontes como o `nasdaqtrader.com` ou a B3, que não são alcançáveis
+do ambiente onde este projeto é desenvolvido. Isso não limita a busca por
+preço/beta em si: qualquer ticker real digitado funciona via `yfinance`,
+esteja ele na lista curada ou não — a lista é só um atalho de autocomplete
+para os nomes mais comuns.

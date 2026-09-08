@@ -65,7 +65,6 @@ REQUIRED_FIELD_ALIASES: dict[str, list[str]] = {
     "ebit": ["IS_COMPARABLE_EBIT"],
     "ebitda_adjusted": ["IS_COMPARABLE_EBITDA"],
     "da": ["CF_DEPR_AMORT", "CB_IS_DEPRECIATION_AMORT_EXP"],
-    "interest_expense": ["IS_NET_INTEREST_EXPENSE", "CB_IS_INTEREST_EXPENSE", "IS_INT_EXPENSES"],
     "pretax_income": ["PRETAX_INC", "IS_COMP_PTP_EX_STK_BASED_COMP"],
     "tax_expense": ["IS_INC_TAX_EXP"],
     "net_income": ["IS_COMP_NET_INCOME_GAAP"],
@@ -79,10 +78,21 @@ REQUIRED_FIELD_ALIASES: dict[str, list[str]] = {
 # net_debt falls back to long_term_debt - cash; nwc_change defaults to 0
 # (a documented simplification — some business models, e.g. alternative
 # asset managers, genuinely don't have a meaningful working-capital cycle).
+# interest_expense is optional (rather than required) because its Bloomberg
+# field code varies more than any other concept here across industry
+# templates -- when none of these aliases match, it defaults to 0.0 (cost
+# of debt then reads as 0% rather than crashing the whole upload; see
+# load_historicals()) and app.py surfaces that explicitly.
 OPTIONAL_FIELD_ALIASES: dict[str, list[str]] = {
     "net_debt": ["NET_DEBT"],
     "nwc_change": ["CF_CHNG_NON_CASH_WORK_CAP"],
     "cash": ["BS_CASH_CASH_EQUIVALENTS_AND_STI", "BS_CASH_NEAR_CASH_ITEM"],
+    "interest_expense": [
+        "IS_NET_INTEREST_EXPENSE", "CB_IS_INTEREST_EXPENSE", "IS_INT_EXPENSES",
+        "IS_INTEREST_EXPENSE", "IS_NET_INTEREST_INC_EXP", "FIN_NET_INT_EXP",
+        "IS_TOT_INT_EXP", "NET_INT_EXP_GAAP", "IS_INTEREST_EXPENSE_NET",
+        "CB_IS_NET_INTEREST_EXPENSE", "IS_INTEREST_INC_EXP_NET",
+    ],
 }
 
 # Long-run nominal growth used to fade Mode B's revenue growth down to
@@ -196,6 +206,8 @@ def load_historicals(ws) -> list[dict]:
         record.pop("cash", None)
         if record["nwc_change"] is None:
             record["nwc_change"] = 0.0
+        if record["interest_expense"] is None:
+            record["interest_expense"] = 0.0
 
         records.append(record)
     return records
