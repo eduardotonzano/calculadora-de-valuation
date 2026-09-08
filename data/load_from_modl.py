@@ -44,6 +44,7 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.utils import column_index_from_string
 
 # Columns C..O on a hand-built DCF sheet hold FY2026E..FY2038E (13 years)
 # for every assumption block (Base, Bear, Bull) and for the FCF build.
@@ -53,12 +54,6 @@ YEAR_COLS = ["C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O"]
 FIRST_FORECAST_YEAR = 2026
 TOTAL_FORECAST_YEARS = len(YEAR_COLS)  # 13
 
-# Columns E..N on the "Multiple Periods" sheet hold 10 fiscal years, most
-# recent forward estimate first. Which specific years they map to (and
-# where the estimate/actual boundary falls) varies by company/as-of date —
-# period_type_for_column() reads that per column rather than assuming a
-# fixed split.
-MULTIPLE_PERIODS_YEAR_COLS = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]
 
 # Bloomberg field-code alias chains per historicals concept, most standard/
 # universal code first. Required: the loader raises if NONE of a concept's
@@ -126,6 +121,17 @@ REQUIRED_SHEETS_MODE_A = ("Multiple Periods", "DCF", "WACC")
 REQUIRED_MARKET_DATA_KEYS = ("risk_free_rate", "beta", "equity_risk_premium", "stock_price")
 
 
+def _numeric_or_none(value):
+    """Bloomberg sometimes leaves a gap in an otherwise-numeric estimate
+    series as an empty string rather than a blank cell -- normalize that
+    to None so it doesn't get stored as text in a REAL column (SQLite
+    doesn't enforce column types) and only blow up arithmetic later, far
+    from the actual cause."""
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
 def find_all_field_rows(ws) -> dict[str, int]:
     """Map every Bloomberg field code appearing in column B to its first row."""
     rows: dict[str, int] = {}
@@ -133,6 +139,17 @@ def find_all_field_rows(ws) -> dict[str, int]:
         if cell.value and cell.value not in rows:
             rows[cell.value] = cell.row
     return rows
+
+
+def find_year_columns(ws, header_row: int = 3) -> list[str]:
+    """Year columns on the historicals sheet, detected from the period-label
+    row ('2026 A (Fwd)', '2025 A (Rep)', ...) instead of assumed to sit in a
+    fixed E:N range. A field-code MODL export happens to start at column E
+    (10 years); a raw export saved straight from Bloomberg's on-screen grid
+    (no field-code column at all) starts at column B instead and can span a
+    different number of years -- this reads whichever columns the sheet
+    actually has."""
+    return [cell.column_letter for cell in ws[header_row] if cell.value and re.match(r"^\d{4}\s", str(cell.value))]
 
 
 def resolve_concept(all_rows: dict[str, int], aliases: list[str]) -> int | None:
@@ -166,13 +183,13 @@ def load_historicals(ws) -> list[dict]:
     optional_rows = {concept: resolve_concept(all_rows, aliases) for concept, aliases in OPTIONAL_FIELD_ALIASES.items()}
 
     records = []
-    for col in MULTIPLE_PERIODS_YEAR_COLS:
+    for col in find_year_columns(ws):
         year = ws[f"{col}4"].value.year
         record = {"fiscal_year": year, "period_type": period_type_for_column(ws, col)}
         for concept, row in required_rows.items():
-            record[concept] = ws[f"{col}{row}"].value
+            record[concept] = _numeric_or_none(ws[f"{col}{row}"].value)
         for concept, row in optional_rows.items():
-            record[concept] = ws[f"{col}{row}"].value if row else None
+            record[concept] = _numeric_or_none(ws[f"{col}{row}"].value) if row else None
 
         if record["net_debt"] is None:
             record["net_debt"] = (record["long_term_debt"] or 0) - (record["cash"] or 0)
@@ -242,6 +259,172 @@ def parse_as_of_date(header: str) -> str | None:
     if not match:
         return None
     return datetime.strptime(match.group(1), "%m/%d/%Y").date().isoformat()
+
+
+def find_multiple_periods_sheet(wb):
+    """The historicals/consensus sheet, found by its title text (cell A1
+    ends in "... (Multiple Periods)") rather than its tab name. A workbook
+    saved straight from Bloomberg with no manual renaming can leave the tab
+    itself named "Planilha1"/"Sheet1" (whatever the spreadsheet app's
+    default is) while the sheet's own title still reads correctly. Falls
+    back to a tab literally named "Multiple Periods" for workbooks with no
+    title in A1."""
+    for ws in wb.worksheets:
+        title = ws["A1"].value
+        if title and "multiple periods" in str(title).lower():
+            return ws
+    return wb["Multiple Periods"] if "Multiple Periods" in wb.sheetnames else None
+
+
+# --------------------------------------- label-only export (no field codes) --
+# A workbook saved straight from Bloomberg's on-screen "Company Financial
+# (Multiple Periods)" grid -- rather than exported via the field-code-driven
+# MODL template every other path in this module assumes -- has no BDH-style
+# field-code column: column B holds the first year's data, not a code, and
+# year columns start wherever the screen put them (column B, not E). Labels
+# repeat across the sheet (e.g. "Revenue" and "Net Income" both appear under
+# segment/business breakdowns AND under the actual financial statements), so
+# each concept is resolved within a named section -- "Income Statement",
+# "Condensed Balance Sheet", "Condensed Cash Flow Statement" (Bloomberg's
+# own, standard headers for this screen) -- at a specific indent depth,
+# rather than by a bare text search.
+
+LABEL_SECTIONS = ("Income Statement", "Condensed Balance Sheet", "Condensed Cash Flow Statement")
+
+# concept -> (section, exact line-item label, indent depth within that section)
+REQUIRED_LABEL_MAP: dict[str, tuple[str, str, int]] = {
+    "revenue": ("Income Statement", "Total Revenue", 1),
+    "ebit": ("Income Statement", "Operating Income", 1),
+    "ebitda_adjusted": ("Income Statement", "EBITDA", 2),
+    "da": ("Income Statement", "Depreciation & Amortization", 1),
+    # Gross interest expense, not the net-of-interest-income figure: a
+    # net-cash company (e.g. Alphabet) has negative net interest, which
+    # would otherwise make dcf_engine.get_wacc()'s pretax cost of debt
+    # negative -- a company's cost of its own debt shouldn't depend on how
+    # much interest income its cash balance happens to throw off.
+    "interest_expense": ("Income Statement", "Interest Expense", 2),
+    "pretax_income": ("Income Statement", "Pre-Tax Income", 1),
+    "tax_expense": ("Income Statement", "Income Tax Expense", 1),
+    "net_income": ("Income Statement", "Net Income", 1),
+    "eps_diluted_adjusted": ("Income Statement", "Diluted EPS", 2),
+    "long_term_debt": ("Condensed Balance Sheet", "Long-Term Debt", 3),
+    "capex": ("Condensed Cash Flow Statement", "Capital Expenditures", 2),
+    "shares_diluted": ("Income Statement", "Diluted Weighted Avg. Shares", 1),
+}
+OPTIONAL_LABEL_MAP: dict[str, tuple[str, str, int]] = {
+    "cash": ("Condensed Balance Sheet", "Cash Cash Equivalents and Short term Investments", 3),
+    "nwc_change": ("Condensed Cash Flow Statement", "Changes in Working Capital", 2),
+}
+
+
+def _row_label_depth(ws, row: int) -> tuple[str, int] | None:
+    """(stripped label, indent depth) for column A of `row`, or None for a
+    blank row. Depth is the leading-space count halved (this template
+    indents two spaces per nesting level)."""
+    raw = ws.cell(row=row, column=1).value
+    if raw is None or not str(raw).strip():
+        return None
+    text = str(raw)
+    return text.strip(), (len(text) - len(text.lstrip(" "))) // 2
+
+
+def find_section_row(ws, label: str, max_row: int) -> int | None:
+    """First row whose column-A label matches `label` exactly (any depth) --
+    used to locate a named section header, e.g. "Income Statement"."""
+    for row in range(1, max_row + 1):
+        parsed = _row_label_depth(ws, row)
+        if parsed and parsed[0].lower() == label.lower():
+            return row
+    return None
+
+
+def find_label_in_range(ws, start_row: int, end_row: int, label: str, depth: int) -> int | None:
+    """First row in [start_row, end_row) whose column-A label matches
+    `label` exactly at exactly `depth` -- the depth filter is what
+    disambiguates a repeated label like "Net Income" (the statement's own
+    line vs. a nested "Adjusted Results" variant a few rows below it)."""
+    for row in range(start_row, end_row):
+        parsed = _row_label_depth(ws, row)
+        if parsed and parsed[1] == depth and parsed[0].lower() == label.lower():
+            return row
+    return None
+
+
+def sum_child_rows(ws, header_row: int, header_depth: int, col: str, max_row: int) -> float | None:
+    """Sum numeric values in `col` across the rows nested under header_row
+    (depth > header_depth), stopping at the next row at or above that
+    depth. Used when a subtotal row (e.g. "Changes in Working Capital") is
+    left blank in the export but its components underneath it aren't."""
+    col_idx = column_index_from_string(col)
+    total = None
+    for row in range(header_row + 1, max_row + 1):
+        parsed = _row_label_depth(ws, row)
+        if parsed is None:
+            continue
+        if parsed[1] <= header_depth:
+            break
+        value = ws.cell(row=row, column=col_idx).value
+        if isinstance(value, (int, float)):
+            total = (total or 0) + value
+    return total
+
+
+def load_historicals_by_label(ws) -> list[dict]:
+    """Fallback historicals loader for a label-only export (see module note
+    above): resolves every concept by (section, label, depth) via
+    REQUIRED_LABEL_MAP/OPTIONAL_LABEL_MAP instead of a Bloomberg field
+    code. Raises the same way load_historicals() does when something
+    load-bearing can't be found."""
+    max_row = ws.max_row
+    section_rows = {name: find_section_row(ws, name, max_row) for name in LABEL_SECTIONS}
+    missing_sections = [name for name, row in section_rows.items() if row is None]
+    if missing_sections:
+        raise ValueError(
+            f"Could not find section(s) {missing_sections} in this workbook, and no "
+            "Bloomberg field codes were found either -- this layout isn't one this "
+            "loader recognizes."
+        )
+    income_row, bs_row, cf_row = (section_rows[name] for name in LABEL_SECTIONS)
+    bounds = {
+        "Income Statement": (income_row, bs_row),
+        "Condensed Balance Sheet": (bs_row, cf_row),
+        "Condensed Cash Flow Statement": (cf_row, max_row + 1),
+    }
+
+    def resolve(section: str, label: str, depth: int) -> int | None:
+        start, end = bounds[section]
+        return find_label_in_range(ws, start + 1, end, label, depth)
+
+    required_rows = {concept: resolve(*spec) for concept, spec in REQUIRED_LABEL_MAP.items()}
+    missing = [concept for concept, row in required_rows.items() if row is None]
+    if missing:
+        raise ValueError(
+            f"Could not find line item(s) for {missing} under their expected section "
+            f"in this label-only export. Tried: {[REQUIRED_LABEL_MAP[c] for c in missing]}."
+        )
+    optional_rows = {concept: resolve(*spec) for concept, spec in OPTIONAL_LABEL_MAP.items()}
+
+    records = []
+    for col in find_year_columns(ws):
+        year = ws[f"{col}4"].value.year
+        record = {"fiscal_year": year, "period_type": period_type_for_column(ws, col)}
+        for concept, row in required_rows.items():
+            record[concept] = _numeric_or_none(ws[f"{col}{row}"].value)
+        for concept, row in optional_rows.items():
+            record[concept] = _numeric_or_none(ws[f"{col}{row}"].value) if row else None
+
+        if record.get("nwc_change") is None and optional_rows.get("nwc_change"):
+            nwc_row = optional_rows["nwc_change"]
+            nwc_depth = OPTIONAL_LABEL_MAP["nwc_change"][2]
+            record["nwc_change"] = sum_child_rows(ws, nwc_row, nwc_depth, col, max_row)
+
+        cash = record.pop("cash", None)
+        record["net_debt"] = (record["long_term_debt"] or 0) - (cash or 0)
+        if record["nwc_change"] is None:
+            record["nwc_change"] = 0.0
+
+        records.append(record)
+    return records
 
 
 # ------------------------------------------------------ Mode B: derive it --
@@ -319,12 +502,19 @@ def derive_scenario_assumptions(historicals: list[dict]) -> dict[str, list[dict]
 
 def load_workbook_data(xlsx_path: Path, market_data: dict | None = None) -> dict:
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    mp_ws = wb["Multiple Periods"] if "Multiple Periods" in wb.sheetnames else None
+    mp_ws = find_multiple_periods_sheet(wb)
     if mp_ws is None:
         raise ValueError(
             f"This workbook has no 'Multiple Periods' sheet (found {wb.sheetnames}). "
             "That sheet is required in every mode — it's the historicals/consensus data."
         )
+
+    # A field-code MODL export has Bloomberg codes (IS_COMP_SALES etc.) in
+    # column B; a raw export saved straight from the on-screen grid doesn't
+    # -- see load_historicals_by_label()'s module note.
+    mp_field_rows = find_all_field_rows(mp_ws)
+    has_field_codes = any(code in mp_field_rows for aliases in REQUIRED_FIELD_ALIASES.values() for code in aliases)
+    load_mp_historicals = load_historicals if has_field_codes else load_historicals_by_label
 
     has_dcf_wacc = "DCF" in wb.sheetnames and "WACC" in wb.sheetnames
 
@@ -343,7 +533,7 @@ def load_workbook_data(xlsx_path: Path, market_data: dict | None = None) -> dict
             "name": parse_company_name_from_title(dcf_ws["A1"].value or ""),
             "as_of_date": parse_as_of_date(dcf_ws["A2"].value or ""),
             "data_source": "modl_tabs",
-            "historicals": load_historicals(mp_ws),
+            "historicals": load_mp_historicals(mp_ws),
             "wacc_inputs": load_wacc_inputs(wacc_ws),
             "scenarios": scenarios,
             "terminal_multiples": terminal_multiples,
@@ -362,7 +552,7 @@ def load_workbook_data(xlsx_path: Path, market_data: dict | None = None) -> dict
             "data), so it can't be derived and won't be guessed."
         )
 
-    historicals = load_historicals(mp_ws)
+    historicals = load_mp_historicals(mp_ws)
     scenarios = derive_scenario_assumptions(historicals)
     latest_actual = max((h for h in historicals if h["period_type"] == "actual"), key=lambda h: h["fiscal_year"])
 

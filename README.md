@@ -20,13 +20,13 @@ risk-free rate, ERP) — ver "Duas fontes de dados: `modl_tabs` vs.
 | Componente | Status |
 |---|---|
 | `data/schema.sql` | Pronto |
-| `data/load_from_modl.py` | Pronto — extrai (Modo A) ou calcula (Modo B) DCF/WACC/perpetuidade, ver seção abaixo |
+| `data/load_from_modl.py` | Pronto — extrai (Modo A) ou calcula (Modo B) DCF/WACC/perpetuidade; lê planilhas com ou sem código de campo Bloomberg, ver seção abaixo |
 | `data/valuation.db` | Populado com AppLovin (APP US, Modo A) |
 | `dcf_engine.py` | Pronto, output validado célula a célula ($388.54 no caso base da AppLovin) |
 | `target_price.py` | Pronto — `from_ev_ebitda()`, `from_pe()`, `from_peg()`, degrada graciosamente quando um método não tem dado suficiente |
 | `sensitivity.py` | Pronto — tabelas WACC × múltiplo, crescimento × margem, e risk-free × beta |
 | `app.py` (Streamlit) | Pronto — abre todos os cálculos, não só o resultado final; upload calcula tudo, inclusive DCF/WACC quando o arquivo não os traz |
-| `tests/test_valuation.py` + CI | Pronto — 28 testes `pytest`, rodando no GitHub Actions a cada push/PR |
+| `tests/test_valuation.py` + CI | Pronto — 31 testes `pytest`, rodando no GitHub Actions a cada push/PR |
 
 Rode para confirmar que tudo está funcionando:
 
@@ -36,9 +36,10 @@ python dcf_engine.py data/valuation.db "APP US" base
 # ... Price per share: $388.54
 python target_price.py data/valuation.db "APP US" base
 
-# suite de regressão (28 testes) — cobre o caso base, os limites de
-# explicit_years, a lacuna de cobertura do P/E, o isolamento multi-empresa
-# e a derivação de premissas do Modo B
+# suite de regressão (31 testes) — cobre o caso base, os limites de
+# explicit_years, a lacuna de cobertura do P/E, o isolamento multi-empresa,
+# a derivação de premissas do Modo B e a leitura de planilhas sem código
+# de campo Bloomberg
 pip install -r requirements-dev.txt
 pytest
 ```
@@ -400,7 +401,8 @@ externos foram implementadas:
   ou parâmetros inválidos.
 - **CI no GitHub Actions** (`.github/workflows/tests.yml`) rodando a cada
   push/PR: compila todos os módulos, roda os testes de
-  `tests/test_valuation.py` (28 no momento, incluindo os do Modo B), e
+  `tests/test_valuation.py` (31 no momento, incluindo os do Modo B e os do
+  parser sem código de campo Bloomberg), e
   faz um smoke test das três CLIs contra o
   `data/valuation.db` versionado. Os bugs desta revisão só tinham sido
   achados porque testei manualmente depois do fato — agora regressões
@@ -471,3 +473,83 @@ do parser:
   diferente (`I` em vez de `J`) — `load_from_modl.py` já lê isso
   dinamicamente pelo rótulo de cada coluna (`period_type_for_column()`),
   não por posição fixa, então essa parte funcionou sem nenhuma mudança.
+
+## Testado com uma terceira empresa real — um export sem nenhuma edição
+
+Um terceiro arquivo real (Alphabet, GOOGL US) — explicitamente descrito
+como "puro", sem nenhuma alteração manual — expôs que "sem abas
+DCF/WACC" não é a única variação que um export bruto do Bloomberg pode
+ter. Esse arquivo:
+
+- Tinha a aba renomeada para `Planilha1` (o padrão do LibreOffice/Excel
+  em PT-BR) em vez de `Multiple Periods` — o texto "... (Multiple
+  Periods)" só sobrevivia no título da própria planilha (célula `A1`),
+  não no nome da aba.
+- Não tinha **nenhum** código de campo Bloomberg na coluna B (`IS_COMP_SALES`
+  etc.) — a coluna B já era o primeiro ano de dado. Isso é o resultado de
+  salvar a tela "Company Financial (Multiple Periods)" do Bloomberg
+  diretamente (`Ctrl+Alt+S` ou similar), em vez de exportar via o
+  template MODL orientado a código de campo que os outros dois arquivos
+  usam — aparentemente dois jeitos diferentes de tirar a mesma tela do
+  Bloomberg, e um analista sem saber a diferença não teria como prever
+  qual vai sair.
+- Os anos de dado começavam na coluna `B`, não na `E`, e cobriam 15 anos
+  (FY2021–FY2035) em vez de 10.
+
+Nenhuma dessas três coisas era algo que `load_from_modl.py` conseguia
+lidar antes — o loader simplesmente não encontrava a aba `Multiple
+Periods` e falhava de cara. As correções, todas em `data/load_from_modl.py`:
+
+- **`find_multiple_periods_sheet()`** substitui a checagem por nome de
+  aba: percorre todas as abas do workbook e usa a primeira cujo título
+  (`A1`) contenha "(Multiple Periods)", com fallback para uma aba
+  literalmente chamada `Multiple Periods`.
+- **`find_year_columns()`** substitui a lista fixa de colunas E–N:
+  detecta as colunas de ano lendo o rótulo de cada uma na linha de
+  período (`"2026 A (Fwd)"` etc.), então funciona igual para 10 anos
+  começando em `E` ou 15 anos começando em `B`.
+- **`load_historicals_by_label()`** é o caminho novo para quando não há
+  nenhum código de campo Bloomberg na planilha: cada conceito (receita,
+  EBIT, EBITDA ajustado, ...) é resolvido pelo rótulo em texto da coluna
+  A — mas rótulos se repetem na mesma planilha (ex.: "Net Income"
+  aparece na demonstração de resultado, nos resultados ajustados e na
+  demonstração de fluxo de caixa; "Revenue" aparece de novo em cada
+  segmento de negócio). A resolução usa três coisas ao mesmo tempo:
+  **em que seção** ("Income Statement", "Condensed Balance Sheet",
+  "Condensed Cash Flow Statement" — cabeçalhos padrão do Bloomberg para
+  essa tela), **qual rótulo exato**, e **em que nível de indentação**
+  (a planilha indenta 2 espaços por nível de aninhamento) — as três
+  coisas juntas desambiguam qualquer rótulo repetido.
+- Achado no meio do caminho: o EPS diluído ajustado do consenso da
+  Alphabet vinha como string vazia (`''`) em alguns anos distantes
+  (2032–2034) em vez de célula em branco — gravar isso direto numa
+  coluna `REAL` do SQLite funcionaria sem erro (SQLite não impõe tipo de
+  coluna) e só quebraria bem mais tarde, numa conta em `target_price.py`
+  longe da causa real. `_numeric_or_none()` normaliza qualquer string
+  vazia/só-espaço para `None` no ponto em que o valor é lido da célula,
+  para os dois formatos (com e sem código de campo).
+- Achado mais sério: a Alphabet é uma empresa de caixa líquido positivo
+  (mais caixa do que dívida) — a despesa de juros *líquida* (receita de
+  juros do caixa menos despesa de juros da dívida) é **negativa**. O
+  formato antigo usa essa métrica líquida (`IS_NET_INTEREST_EXPENSE`)
+  para o custo de dívida em `dcf_engine.get_wacc()`
+  (`Kd = despesa de juros / dívida total`); com o valor líquido negativo,
+  isso vira um custo de dívida negativo, algo que nenhum WACC deveria
+  ter. `load_historicals_by_label()` resolve `interest_expense` para a
+  despesa de juros **bruta** (a linha "Interest Expense" dentro de
+  "Interest Expense/(Income), Net", não o líquido) — o custo de uma
+  empresa financiar sua própria dívida não deveria depender de quanta
+  receita de juros o caixa dela rende.
+
+Confirmado por regressão: o preço-alvo de $388.54 da AppLovin (Modo
+`modl_tabs`, caminho por código de campo) e o resultado da Blackstone
+(Modo `derived`, caminho por código de campo) continuam idênticos depois
+dessa mudança — o caminho por rótulo só entra em ação quando nenhum
+código de campo é encontrado na planilha. O arquivo da Alphabet não foi
+versionado no repositório (dado de terceiros); o caminho por rótulo está
+coberto por testes com uma planilha sintética mínima
+(`tests/test_valuation.py`), incluindo um teste específico para a
+desambiguação por profundidade (dois rótulos "Net Income" idênticos em
+níveis de indentação diferentes, só um deles correto) e um para o
+fallback de "Changes in Working Capital" quando essa linha vem em branco
+mas as linhas-filhas por baixo dela têm valor.
