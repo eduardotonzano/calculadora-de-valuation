@@ -301,9 +301,10 @@ latest_actual = get_latest_actual(conn, company_id)
 current_price = wacc_data["stock_price"]
 dcf_result = run_dcf(conn, ticker, scenario, explicit_years=explicit_years)
 
+as_of = company["as_of_date"] or "sem data-base (planilha não traz esse carimbo fora das abas DCF/WACC)"
 st.title(f"{company['name']} ({company['ticker']})")
 st.caption(
-    f"As of {company['as_of_date']} · valores em {company['currency']} {company['units']} · "
+    f"As of {as_of} · valores em {company['currency']} {company['units']} · "
     f"cenário: {scenario} · fonte: {db_path}"
 )
 
