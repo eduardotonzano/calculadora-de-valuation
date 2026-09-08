@@ -1,0 +1,28 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Compile-check every module
+        run: python -m py_compile *.py data/*.py tests/*.py
+
+      - run: pytest -v
+
+      - name: CLI smoke test against the committed valuation.db
+        run: |
+          python dcf_engine.py data/valuation.db "APP US" base
+          python target_price.py data/valuation.db "APP US" base
+          python sensitivity.py data/valuation.db "APP US" base
