@@ -1,0 +1,98 @@
+ticker,name,exchange
+AAPL,Apple Inc,NASDAQ
+MSFT,Microsoft Corp,NASDAQ
+GOOGL,Alphabet Inc Class A,NASDAQ
+GOOG,Alphabet Inc Class C,NASDAQ
+AMZN,Amazon.com Inc,NASDAQ
+NVDA,NVIDIA Corp,NASDAQ
+META,Meta Platforms Inc,NASDAQ
+TSLA,Tesla Inc,NASDAQ
+AVGO,Broadcom Inc,NASDAQ
+ADBE,Adobe Inc,NASDAQ
+NFLX,Netflix Inc,NASDAQ
+COST,Costco Wholesale Corp,NASDAQ
+PEP,PepsiCo Inc,NASDAQ
+AMD,Advanced Micro Devices Inc,NASDAQ
+CSCO,Cisco Systems Inc,NASDAQ
+INTC,Intel Corp,NASDAQ
+QCOM,QUALCOMM Inc,NASDAQ
+TXN,Texas Instruments Inc,NASDAQ
+INTU,Intuit Inc,NASDAQ
+AMGN,Amgen Inc,NASDAQ
+HON,Honeywell International Inc,NASDAQ
+SBUX,Starbucks Corp,NASDAQ
+BKNG,Booking Holdings Inc,NASDAQ
+GILD,Gilead Sciences Inc,NASDAQ
+ADP,Automatic Data Processing Inc,NASDAQ
+MDLZ,Mondelez International Inc,NASDAQ
+APP,AppLovin Corp,NASDAQ
+PYPL,PayPal Holdings Inc,NASDAQ
+BRK.B,Berkshire Hathaway Inc Class B,NYSE
+JPM,JPMorgan Chase & Co,NYSE
+V,Visa Inc,NYSE
+MA,Mastercard Inc,NYSE
+UNH,UnitedHealth Group Inc,NYSE
+XOM,Exxon Mobil Corp,NYSE
+JNJ,Johnson & Johnson,NYSE
+PG,Procter & Gamble Co,NYSE
+HD,Home Depot Inc,NYSE
+BAC,Bank of America Corp,NYSE
+KO,Coca-Cola Co,NYSE
+MRK,Merck & Co Inc,NYSE
+WMT,Walmart Inc,NYSE
+CVX,Chevron Corp,NYSE
+ABBV,AbbVie Inc,NYSE
+CRM,Salesforce Inc,NYSE
+ORCL,Oracle Corp,NYSE
+LLY,Eli Lilly and Co,NYSE
+MCD,McDonald's Corp,NYSE
+DIS,Walt Disney Co,NYSE
+WFC,Wells Fargo & Co,NYSE
+CAT,Caterpillar Inc,NYSE
+GE,General Electric Co,NYSE
+IBM,International Business Machines Corp,NYSE
+GS,Goldman Sachs Group Inc,NYSE
+MS,Morgan Stanley,NYSE
+AXP,American Express Co,NYSE
+BX,Blackstone Inc,NYSE
+NKE,Nike Inc,NYSE
+T,AT&T Inc,NYSE
+VZ,Verizon Communications Inc,NYSE
+UPS,United Parcel Service Inc,NYSE
+BA,Boeing Co,NYSE
+PFE,Pfizer Inc,NYSE
+SPGI,S&P Global Inc,NYSE
+LOW,Lowe's Companies Inc,NYSE
+UBER,Uber Technologies Inc,NYSE
+NEE,NextEra Energy Inc,NYSE
+RTX,RTX Corp,NYSE
+VALE3.SA,Vale ON,IBOVESPA
+PETR4.SA,Petrobras PN,IBOVESPA
+PETR3.SA,Petrobras ON,IBOVESPA
+ITUB4.SA,Itau Unibanco PN,IBOVESPA
+BBDC4.SA,Bradesco PN,IBOVESPA
+BBAS3.SA,Banco do Brasil ON,IBOVESPA
+ABEV3.SA,Ambev ON,IBOVESPA
+B3SA3.SA,B3 ON,IBOVESPA
+WEGE3.SA,WEG ON,IBOVESPA
+RENT3.SA,Localiza ON,IBOVESPA
+SUZB3.SA,Suzano ON,IBOVESPA
+JBSS3.SA,JBS ON,IBOVESPA
+RADL3.SA,Raia Drogasil ON,IBOVESPA
+PRIO3.SA,PRIO ON,IBOVESPA
+EQTL3.SA,Equatorial Energia ON,IBOVESPA
+GGBR4.SA,Gerdau PN,IBOVESPA
+CSAN3.SA,Cosan ON,IBOVESPA
+ELET3.SA,Eletrobras ON,IBOVESPA
+HAPV3.SA,Hapvida ON,IBOVESPA
+LREN3.SA,Lojas Renner ON,IBOVESPA
+MGLU3.SA,Magazine Luiza ON,IBOVESPA
+CMIG4.SA,Cemig PN,IBOVESPA
+SBSP3.SA,Sabesp ON,IBOVESPA
+TOTS3.SA,Totvs ON,IBOVESPA
+UGPA3.SA,Ultrapar ON,IBOVESPA
+VIVT3.SA,Telefonica Brasil ON,IBOVESPA
+BPAC11.SA,BTG Pactual Unit,IBOVESPA
+CPLE6.SA,Copel PN,IBOVESPA
+RAIL3.SA,Rumo ON,IBOVESPA
+EMBR3.SA,Embraer ON,IBOVESPA

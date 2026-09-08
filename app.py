@@ -22,6 +22,7 @@ import openpyxl
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import yfinance as yf
 
 from data.load_from_modl import load_workbook_data, migrate_schema, write_to_db
 from dcf_engine import get_company_id, get_wacc, run_dcf
@@ -50,22 +51,89 @@ SOURCE_FILE_BASE_CASE_CELLS = [
 
 CSS = """
 <style>
-h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; letter-spacing: -0.01em; }
-[data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+:root {
+    --ink: #201d18; --ink-2: #5b5647; --muted: #8a8371; --border: #e2ddce;
+    --surface: #ffffff; --surface-2: #f5f2e9; --bg: #faf8f2;
+    --accent: #a8461f; --accent-soft: #f3e2d6; --positive: #2e7d4f; --positive-soft: #e1efe5;
+}
+
+.stApp { background: var(--bg); }
+[data-testid="stAppViewContainer"], [data-testid="stMain"] { font-family: "IBM Plex Sans", system-ui, sans-serif; color: var(--ink); }
+h1, h2, h3 { font-family: "Source Serif 4", Georgia, serif; letter-spacing: -0.01em; color: var(--ink); font-weight: 700; }
+h1 { font-size: 2.1rem !important; }
+h2 { font-size: 1.35rem !important; margin-top: 1.6rem !important; }
+h3 { font-size: 1.1rem !important; }
+p, li, span, div { font-variant-numeric: tabular-nums; }
+
+/* -- sidebar -- */
+section[data-testid="stSidebar"] {
+    background: var(--surface); border-right: 1px solid var(--border);
+}
+section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
+    font-family: "IBM Plex Sans", sans-serif !important; font-size: 0.78rem !important;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted) !important;
+    font-weight: 600 !important; margin: 1.1rem 0 0.3rem 0 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+    background: var(--surface-2); border: 1.5px dashed #cfc6ac; border-radius: 10px;
+}
+
+/* -- metrics -- */
+[data-testid="stMetric"] {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 0.85rem 1rem; box-shadow: 0 1px 2px rgba(40,30,10,0.05);
+}
+[data-testid="stMetricLabel"] { color: var(--muted); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.05em; }
+[data-testid="stMetricValue"] {
+    font-family: "Source Serif 4", serif; font-variant-numeric: tabular-nums; color: var(--ink);
+}
+
+/* -- tabs -- */
+[data-baseweb="tab-list"] { gap: 0.25rem; border-bottom: 1px solid var(--border); }
+[data-baseweb="tab"] {
+    font-family: "IBM Plex Sans", sans-serif; font-weight: 500; color: var(--muted);
+    padding: 0.6rem 0.9rem !important;
+}
+[data-baseweb="tab"][aria-selected="true"] { color: var(--accent) !important; font-weight: 600; }
+[data-baseweb="tab-highlight"] { background-color: var(--accent) !important; height: 2.5px !important; }
+
+/* -- buttons -- */
+.stButton button, .stFormSubmitButton button {
+    background: var(--accent); color: #fff9f2; border: none; border-radius: 8px;
+    font-weight: 600; font-family: "IBM Plex Sans", sans-serif;
+}
+.stButton button:hover, .stFormSubmitButton button:hover { background: #8f3a19; color: #fff9f2; }
+section[data-testid="stSidebar"] .stButton button[kind="secondary"] {
+    background: var(--surface); color: var(--ink-2); border: 1px solid var(--border);
+}
+
+/* -- content blocks -- */
 .formula-box {
-    background: #f7f6f3; border-left: 3px solid #8a8578; padding: 0.6rem 1rem;
-    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.92rem;
-    margin: 0.4rem 0 0.9rem 0; white-space: pre-wrap;
+    background: var(--surface-2); border-left: 3px solid #c9bb96; border-radius: 0 8px 8px 0;
+    padding: 0.7rem 1.05rem; font-family: "IBM Plex Mono", monospace; font-size: 0.86rem;
+    margin: 0.5rem 0 1rem 0; white-space: pre-wrap; color: var(--ink-2); line-height: 1.6;
 }
 .note {
-    border-left: 3px solid #b3543a; background: #fbf3ef; padding: 0.6rem 1rem;
-    margin: 0.6rem 0; font-size: 0.92rem;
+    border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0;
+    padding: 0.7rem 1.05rem; margin: 0.7rem 0; font-size: 0.9rem; color: var(--ink-2);
 }
 .source-tag {
-    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.78rem;
-    color: #6b6558; margin-top: -0.4rem;
+    font-family: "IBM Plex Mono", monospace; font-size: 0.76rem; color: var(--muted); margin-top: -0.4rem;
 }
+
+/* -- tables -- */
 table td, table th { font-variant-numeric: tabular-nums; }
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+    border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+
+/* -- containers used as cards -- */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: var(--border) !important; border-radius: 12px !important;
+    background: var(--surface);
+}
+hr { border-color: var(--border); }
 </style>
 """
 
@@ -96,6 +164,64 @@ def get_latest_actual(conn: sqlite3.Connection, company_id: int) -> dict:
            ORDER BY fiscal_year DESC LIMIT 1""",
         (company_id,),
     ).fetchone())
+
+
+# Damodaran's published US implied equity risk premium is not something
+# any free live API exposes -- it's a periodic research estimate, not a
+# market quote -- so this is a documented static default the user can
+# override, never presented as live-fetched.
+DEFAULT_ERP = 0.0445
+TICKERS_PATH = Path(__file__).parent / "data" / "tickers.csv"
+
+
+@st.cache_data
+def load_ticker_reference() -> pd.DataFrame:
+    """A small curated set of large/liquid tickers (S&P 500 blue chips,
+    other well-known NASDAQ/NYSE names, Ibovespa) for the sidebar's
+    autocomplete -- not an exhaustive exchange listing (see README).
+    Typing any other real ticker still works via fetch_market_data()."""
+    if not TICKERS_PATH.exists():
+        return pd.DataFrame(columns=["ticker", "name", "exchange"])
+    return pd.read_csv(TICKERS_PATH)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_risk_free_rate() -> float | None:
+    """10Y Treasury yield from ^TNX (quoted at 10x the yield in percentage
+    points, e.g. 44.5 -> 4.45%)."""
+    try:
+        hist = yf.Ticker("^TNX").history(period="5d")
+        closes = hist["Close"].dropna()
+        if closes.empty:
+            return None
+        return float(closes.iloc[-1]) / 1000
+    except Exception:  # noqa: BLE001 — network/parse failures degrade to manual entry
+        return None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_market_data(ticker: str) -> tuple[dict | None, str | None]:
+    """Live stock price + beta for `ticker` via Yahoo Finance, plus the 10Y
+    Treasury yield and a documented static ERP default. Never fabricates:
+    a field Yahoo doesn't have (e.g. beta for some tickers) is reported
+    back as missing rather than guessed, so the caller can say so."""
+    try:
+        info = yf.Ticker(ticker).info
+    except Exception as exc:  # noqa: BLE001
+        return None, f"não consegui consultar {ticker} no Yahoo Finance ({exc})"
+    price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+    if price is None:
+        return None, f"ticker {ticker!r} não encontrado ou sem preço disponível"
+    beta = info.get("beta")
+    risk_free = _fetch_risk_free_rate()
+    return {
+        "stock_price": round(float(price), 2),
+        "beta": round(float(beta), 2) if beta is not None else 1.0,
+        "beta_missing": beta is None,
+        "risk_free_rate": risk_free if risk_free is not None else 0.045,
+        "risk_free_missing": risk_free is None,
+        "equity_risk_premium": DEFAULT_ERP,
+    }, None
 
 
 def format_axis(value: float, fmt: str) -> str:
@@ -221,13 +347,50 @@ if uploaded_file is not None:
                 "o formato normal de um export Bloomberg MODL. As premissas de cenário e "
                 "o WACC vão ser calculados a partir dos dados históricos; só preciso de 4 "
                 "números de mercado que não existem em nenhum export de demonstrações "
-                "financeiras — preencha com dados reais e atuais."
+                "financeiras."
             )
+
+            ticker_ref = load_ticker_reference()
+            picker_options = ["Digitar manualmente…"] + [
+                f"{row.ticker} — {row.name}" for row in ticker_ref.itertuples()
+            ]
+            picked = st.sidebar.selectbox(
+                "Preencher via ticker (opcional)", picker_options, key="md_ticker_pick",
+                help="Lista curada dos nomes mais conhecidos — qualquer outro ticker real também funciona, digite abaixo.",
+            )
+            manual_ticker = st.sidebar.text_input(
+                "Ou digite o ticker (ex: AAPL, PETR4.SA)", key="md_ticker_manual",
+            )
+            if st.sidebar.button("Buscar preço, beta e 10Y no Yahoo Finance"):
+                resolved = manual_ticker.strip() or (
+                    picked.split(" — ")[0] if picked != "Digitar manualmente…" else ""
+                )
+                if not resolved:
+                    st.sidebar.warning("Escolha da lista ou digite um ticker primeiro.")
+                else:
+                    fetched, fetch_err = fetch_market_data(resolved)
+                    if fetched is None:
+                        st.sidebar.error(f"Falha ao buscar {resolved}: {fetch_err}")
+                    else:
+                        st.session_state["md_stock_price"] = fetched["stock_price"]
+                        st.session_state["md_beta"] = fetched["beta"]
+                        st.session_state["md_risk_free_pct"] = round(fetched["risk_free_rate"] * 100, 3)
+                        st.session_state["md_erp_pct"] = round(fetched["equity_risk_premium"] * 100, 3)
+                        caveats = []
+                        if fetched["beta_missing"]:
+                            caveats.append("beta indisponível no Yahoo, mantive 1.00 — confira antes de carregar")
+                        if fetched["risk_free_missing"]:
+                            caveats.append("10Y Treasury indisponível, mantive 4.50% — confira antes de carregar")
+                        msg = f"Preenchido com dados de {resolved}."
+                        if caveats:
+                            msg += " Atenção: " + "; ".join(caveats) + "."
+                        (st.sidebar.warning if caveats else st.sidebar.success)(msg)
+
             with st.sidebar.form("market_data_form"):
-                stock_price = st.number_input("Preço atual da ação ($)", min_value=0.0, value=0.0, step=0.01)
-                beta = st.number_input("Beta (5Y mensal)", min_value=0.0, value=1.0, step=0.05)
-                risk_free_pct = st.number_input("Risk-free rate — 10Y Treasury (%)", min_value=0.0, value=4.0, step=0.05)
-                erp_pct = st.number_input("Equity Risk Premium (%)", min_value=0.0, value=4.5, step=0.05)
+                stock_price = st.number_input("Preço atual da ação ($)", min_value=0.0, value=0.0, step=0.01, key="md_stock_price")
+                beta = st.number_input("Beta (5Y mensal)", min_value=0.0, value=1.0, step=0.05, key="md_beta")
+                risk_free_pct = st.number_input("Risk-free rate — 10Y Treasury (%)", min_value=0.0, value=4.0, step=0.05, key="md_risk_free_pct")
+                erp_pct = st.number_input("Equity Risk Premium (%)", min_value=0.0, value=4.5, step=0.05, key="md_erp_pct")
                 submitted = st.form_submit_button("Carregar com esses dados de mercado")
             ready_to_load = submitted and stock_price > 0
             if submitted and stock_price <= 0:
