@@ -23,7 +23,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data.load_from_modl import load_workbook_data, write_to_db
+from data.load_from_modl import load_workbook_data, migrate_schema, write_to_db
 from dcf_engine import get_company_id, get_wacc, run_dcf
 from sensitivity import (
     sensitivity_beta_risk_free,
@@ -74,6 +74,11 @@ table td, table th { font-variant-numeric: tabular-nums; }
 def get_connection(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # A db created before a schema column existed (e.g. the committed
+    # data/valuation.db, from before data_source was added) would otherwise
+    # crash the first time a query reads that column, even without a new
+    # upload -- see migrate_schema()'s docstring.
+    migrate_schema(conn, SCHEMA_PATH)
     return conn
 
 
