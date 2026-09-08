@@ -134,6 +134,16 @@ def heatmap(table: dict, title: str) -> go.Figure:
     return fig
 
 
+def safe_result(fn, *args, **kwargs) -> tuple[dict | None, str | None]:
+    """Call a target_price.from_* function, catching the ValueError those
+    raise when a year isn't covered by the underlying data (e.g. trading_comps
+    only has FY2027E/FY2030E market multiples) instead of crashing the page."""
+    try:
+        return fn(*args, **kwargs), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
 def grid_dataframe(table: dict) -> pd.DataFrame:
     row_labels = [format_axis(v, table["row_format"]) for v in table["row_axis"]]
     col_labels = [format_axis(v, table["col_format"]) for v in table["col_axis"]]
@@ -252,12 +262,27 @@ with tab_summary:
 
     st.subheader("Football field — comparação de métodos")
 
-    results = [
-        {"method": "DCF", "target_price": dcf_result["price_per_share"]},
-        from_ev_ebitda(conn, ticker, scenario=scenario, target_year=target_year),
-        from_pe(conn, ticker, target_year=target_year),
-        from_peg(conn, ticker, target_year=target_year),
-    ]
+    results = [{"method": "DCF", "target_price": dcf_result["price_per_share"]}]
+    unavailable = []
+    for name, fn, kwargs in [
+        ("EV/EBITDA", from_ev_ebitda, dict(scenario=scenario, target_year=target_year)),
+        ("P/E", from_pe, dict(target_year=target_year)),
+        ("PEG", from_peg, dict(target_year=target_year)),
+    ]:
+        result, error = safe_result(fn, conn, ticker, **kwargs)
+        if result is not None:
+            results.append(result)
+        else:
+            unavailable.append((name, error))
+
+    if unavailable:
+        st.caption(
+            "Indisponível para FY{}E: {} — sem dado de mercado para esse ano "
+            "(ver aba Múltiplos para o motivo exato de cada método).".format(
+                target_year, ", ".join(name for name, _ in unavailable)
+            )
+        )
+
     ff_df = pd.DataFrame(
         [{"Método": r["method"], "Preço-alvo": r["target_price"]} for r in results]
     ).sort_values("Preço-alvo")
@@ -490,56 +515,71 @@ with tab_multiples:
                 f"consenso Bloomberg e por isso não variam por cenário bear/base/bull "
                 f"(o arquivo original não tem premissas de EPS por cenário).")
 
-    ev_ebitda_result = from_ev_ebitda(conn, ticker, scenario=scenario, target_year=target_year)
     st.markdown("### EV/EBITDA")
+    ev_ebitda_result, ev_ebitda_error = safe_result(
+        from_ev_ebitda, conn, ticker, scenario=scenario, target_year=target_year
+    )
     formula(
         "EV = EBITDA projetado(ano-alvo) × Múltiplo EV/EBITDA\n"
         "Equity Value = EV − Dívida Líquida\n"
         "Preço-alvo = Equity Value / Ações em circulação"
     )
-    line_items_table([
-        (f"EBITDA projetado (FY{target_year}E, cenário {scenario})", "dcf_engine.project_financials()", f"${ev_ebitda_result['ebitda']:,.1f}M"),
-        ("Múltiplo EV/EBITDA usado", ev_ebitda_result["multiple_source"], f"{ev_ebitda_result['ev_ebitda_multiple']:.1f}x"),
-        ("Enterprise Value", f"{ev_ebitda_result['ebitda']:,.1f} × {ev_ebitda_result['ev_ebitda_multiple']:.1f}", f"${ev_ebitda_result['enterprise_value']:,.1f}M"),
-        ("(−) Dívida Líquida", "", f"−${ev_ebitda_result['net_debt']:,.1f}M"),
-        ("Equity Value", "", f"${ev_ebitda_result['equity_value']:,.1f}M"),
-        ("Preço-alvo", "Equity Value / Ações", f"${ev_ebitda_result['target_price']:,.2f}"),
-    ])
-    source_tag("target_price.from_ev_ebitda()")
+    if ev_ebitda_result:
+        line_items_table([
+            (f"EBITDA projetado (FY{target_year}E, cenário {scenario})", "dcf_engine.project_financials()", f"${ev_ebitda_result['ebitda']:,.1f}M"),
+            ("Múltiplo EV/EBITDA usado", ev_ebitda_result["multiple_source"], f"{ev_ebitda_result['ev_ebitda_multiple']:.1f}x"),
+            ("Enterprise Value", f"{ev_ebitda_result['ebitda']:,.1f} × {ev_ebitda_result['ev_ebitda_multiple']:.1f}", f"${ev_ebitda_result['enterprise_value']:,.1f}M"),
+            ("(−) Dívida Líquida", "", f"−${ev_ebitda_result['net_debt']:,.1f}M"),
+            ("Equity Value", "", f"${ev_ebitda_result['equity_value']:,.1f}M"),
+            ("Preço-alvo", "Equity Value / Ações", f"${ev_ebitda_result['target_price']:,.2f}"),
+        ])
+        source_tag("target_price.from_ev_ebitda()")
+    else:
+        st.warning(f"EV/EBITDA indisponível para FY{target_year}E: {ev_ebitda_error}")
 
-    pe_result = from_pe(conn, ticker, target_year=target_year)
     st.markdown("### P/E")
+    pe_result, pe_error = safe_result(from_pe, conn, ticker, target_year=target_year)
     formula("Preço-alvo = Múltiplo P/E × EPS diluído consenso (ano-alvo)")
-    line_items_table([
-        (f"EPS diluído ajustado (FY{target_year}E)", "historicals (consenso Bloomberg)", f"${pe_result['eps']:,.2f}"),
-        ("Múltiplo P/E usado", pe_result["multiple_source"], f"{pe_result['pe_multiple']:.2f}x"),
-        ("Preço-alvo", f"{pe_result['pe_multiple']:.2f} × {pe_result['eps']:,.2f}", f"${pe_result['target_price']:,.2f}"),
-    ])
-    source_tag("target_price.from_pe() — múltiplo default = trading_comps (P/E de mercado atual para o ano)")
+    if pe_result:
+        line_items_table([
+            (f"EPS diluído ajustado (FY{target_year}E)", "historicals (consenso Bloomberg)", f"${pe_result['eps']:,.2f}"),
+            ("Múltiplo P/E usado", pe_result["multiple_source"], f"{pe_result['pe_multiple']:.2f}x"),
+            ("Preço-alvo", f"{pe_result['pe_multiple']:.2f} × {pe_result['eps']:,.2f}", f"${pe_result['target_price']:,.2f}"),
+        ])
+        source_tag("target_price.from_pe() — múltiplo default = trading_comps (P/E de mercado atual para o ano)")
+    else:
+        st.warning(
+            f"P/E indisponível para FY{target_year}E: {pe_error}. A planilha original só "
+            f"traz múltiplo de mercado (trading_comps) para FY2027E e FY2030E — escolha um "
+            f"desses anos, ou chame target_price.from_pe(..., pe_multiple=X) com um múltiplo próprio."
+        )
 
-    peg_result = from_peg(conn, ticker, target_year=target_year)
     st.markdown("### PEG")
+    peg_result, peg_error = safe_result(from_peg, conn, ticker, target_year=target_year)
     formula(
         "CAGR do EPS = (EPS_alvo / EPS_base) ^ (1/anos) − 1\n"
         "P/E implícito = PEG-alvo × (CAGR do EPS × 100)\n"
         "Preço-alvo = P/E implícito × EPS_alvo"
     )
-    line_items_table([
-        (f"EPS base (FY{peg_result['base_year']}A)", "historicals", f"${peg_result['eps_base']:,.2f}"),
-        (f"EPS alvo (FY{peg_result['target_year']}E)", "historicals", f"${peg_result['eps_target']:,.2f}"),
-        ("CAGR do EPS", f"({peg_result['eps_target']:,.2f}/{peg_result['eps_base']:,.2f})^(1/{peg_result['target_year']-peg_result['base_year']}) − 1", f"{peg_result['eps_cagr']:.2%}"),
-        ("PEG-alvo", "heurística 'valor justo'", f"{peg_result['target_peg']:.2f}x"),
-        ("P/E implícito", f"{peg_result['target_peg']:.2f} × {peg_result['eps_cagr']*100:.2f}", f"{peg_result['implied_pe']:.2f}x"),
-        ("Preço-alvo", f"{peg_result['implied_pe']:.2f} × {peg_result['eps_target']:,.2f}", f"${peg_result['target_price']:,.2f}"),
-    ])
-    note(
-        "Em nomes de altíssimo crescimento como a AppLovin (CAGR de EPS de consenso "
-        "~45% entre FY2025A e FY2027E), a heurística PEG-alvo = 1,0x produz um P/E "
-        "implícito extremo e, por consequência, um preço-alvo bem acima dos demais "
-        "métodos. Não é um bug — é uma limitação conhecida da regra PEG=1 aplicada "
-        "fora do regime de crescimento moderado onde ela foi pensada."
-    )
-    source_tag("target_price.from_peg()")
+    if peg_result:
+        line_items_table([
+            (f"EPS base (FY{peg_result['base_year']}A)", "historicals", f"${peg_result['eps_base']:,.2f}"),
+            (f"EPS alvo (FY{peg_result['target_year']}E)", "historicals", f"${peg_result['eps_target']:,.2f}"),
+            ("CAGR do EPS", f"({peg_result['eps_target']:,.2f}/{peg_result['eps_base']:,.2f})^(1/{peg_result['target_year']-peg_result['base_year']}) − 1", f"{peg_result['eps_cagr']:.2%}"),
+            ("PEG-alvo", "heurística 'valor justo'", f"{peg_result['target_peg']:.2f}x"),
+            ("P/E implícito", f"{peg_result['target_peg']:.2f} × {peg_result['eps_cagr']*100:.2f}", f"{peg_result['implied_pe']:.2f}x"),
+            ("Preço-alvo", f"{peg_result['implied_pe']:.2f} × {peg_result['eps_target']:,.2f}", f"${peg_result['target_price']:,.2f}"),
+        ])
+        note(
+            "Em nomes de altíssimo crescimento como a AppLovin (CAGR de EPS de consenso "
+            "~45% entre FY2025A e FY2027E), a heurística PEG-alvo = 1,0x produz um P/E "
+            "implícito extremo e, por consequência, um preço-alvo bem acima dos demais "
+            "métodos. Não é um bug — é uma limitação conhecida da regra PEG=1 aplicada "
+            "fora do regime de crescimento moderado onde ela foi pensada."
+        )
+        source_tag("target_price.from_peg()")
+    else:
+        st.warning(f"PEG indisponível para FY{target_year}E: {peg_error}")
 
 # ============================================================= Sensibilidade ===
 with tab_sens:

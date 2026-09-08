@@ -202,6 +202,10 @@ def run_dcf(
     always reconciles to this function's own base-case output."""
     if scenario not in ("bear", "base", "bull"):
         raise ValueError(f"scenario must be 'bear', 'base', or 'bull', got {scenario!r}")
+    if not (1 <= explicit_years <= TOTAL_FORECAST_YEARS):
+        raise ValueError(
+            f"explicit_years must be between 1 and {TOTAL_FORECAST_YEARS}, got {explicit_years}"
+        )
 
     company_id = get_company_id(conn, ticker)
     wacc_data = get_wacc(conn, company_id)

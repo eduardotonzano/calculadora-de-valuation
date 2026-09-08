@@ -24,6 +24,11 @@ pip install -r requirements.txt
 python dcf_engine.py data/valuation.db "APP US" base
 # ... Price per share: $388.54
 python target_price.py data/valuation.db "APP US" base
+
+# suite de regressão (17 testes) — cobre o caso base, os limites de
+# explicit_years, a lacuna de cobertura do P/E e o isolamento multi-empresa
+pip install -r requirements-dev.txt
+pytest
 ```
 
 ## Descoberta importante: inconsistência de 5 vs. 13 anos de projeção explícita
@@ -234,11 +239,73 @@ tenta convertê-los para número e desenha seus próprios ticks arredondados
 `xaxis=dict(type="category")` / `yaxis=dict(type="category")` para o eixo
 mostrar os valores verdadeiros da grade.
 
-## Próximos passos
+## Revisão completa do projeto
 
-Nenhum item pendente no escopo original (DCF, target price por múltiplos,
-sensibilidade, interface). Possíveis extensões futuras: suporte a mais de
-uma empresa no mesmo banco (o schema já é multi-empresa; falta só popular
-via `load_from_modl.py` com outro `.xlsx`), upload de `.xlsx` direto pela
-interface, e um terceiro heatmap para o par Beta × Risk-Free Rate que já
-existe na planilha original (linhas 120–126) mas não foi replicado aqui.
+Depois que DCF, múltiplos, sensibilidade e a interface estavam prontos, o
+projeto passou por uma revisão de ponta a ponta — banco de dados, os
+quatro módulos Python e a interface — com testes ativos (não só leitura de
+código). A revisão achou e corrigiu três bugs reais:
+
+1. **`schema.sql` não era idempotente.** As tabelas eram criadas sem
+   `IF NOT EXISTS`; carregar um segundo arquivo (ou reenviar o mesmo) no
+   mesmo banco quebrava com "table already exists". Corrigido antes de
+   liberar o upload pela interface, que depende exatamente desse caminho.
+2. **`dcf_engine.run_dcf()` não validava `explicit_years`.** `0` derrubava
+   a função com `IndexError`; valores negativos (ex. `-1`) não davam erro
+   nenhum — fatiavam a lista de projeção ao contrário e devolviam um
+   preço-alvo plausível, porém errado, sem nenhum aviso. Agora qualquer
+   valor fora de 1–13 levanta `ValueError` explicando o intervalo válido.
+3. **`app.py` derrubava a página inteira ao selecionar FY2026E, FY2028E ou
+   FY2029E como "Ano-alvo".** `trading_comps` só tem múltiplo de P/E de
+   mercado para FY2027E e FY2030E (é tudo que a planilha original
+   calcula) — `target_price.from_pe()` levanta `ValueError` para os
+   outros anos, e a interface não capturava essa exceção. Corrigido com
+   degradação graciosa: cada método de múltiplo agora é chamado via um
+   helper `safe_result()` que mostra um aviso explicando a lacuna de
+   dados em vez de quebrar a página; o football field some só o método
+   indisponível e segue mostrando os outros.
+
+Os três casos (mais o isolamento entre empresas num banco multi-empresa,
+testado com uma segunda empresa clonada) viraram testes automatizados em
+`tests/test_valuation.py` (`pytest`, 17 casos, todos passando) para não
+regredir.
+
+## Sugestões — o que falta para amadurecer o projeto
+
+Nenhum item do escopo original (DCF, target price por múltiplos,
+sensibilidade, interface) ficou pendente. O que listo abaixo são lacunas
+reais encontradas na revisão que não bloqueiam o uso atual (só há uma
+empresa carregada, AppLovin), mas que valem a pena antes de tratar isso
+como uma ferramenta de produção com múltiplas empresas/usuários:
+
+- **Só foi testado com uma empresa real.** O schema e o motor são
+  multi-empresa por design e o isolamento entre empresas foi validado
+  com um clone sintético (`tests/test_valuation.py`), mas nunca com um
+  segundo arquivo `.xlsx` de verdade. Vale carregar um peer (ex. outro
+  ad-tech) para achar premissas do parser que só aparecem com dados
+  diferentes dos da AppLovin.
+- **`get_wacc()` e `from_peg()` têm riscos de divisão por zero / base
+  negativa não tratados.** `pretax_cost_of_debt = juros / dívida total`
+  quebra para uma empresa sem dívida; `from_peg()` eleva
+  `EPS_alvo/EPS_base` a uma potência fracionária, o que quebra
+  silenciosamente (gera um número complexo, depois um erro de formatação
+  mais adiante) se o ano-base tiver EPS negativo — a AppLovin teve
+  EPS negativo em 2022, mas o ano-base usado hoje (2025A) é positivo,
+  então isso não aparece com os dados atuais. Adicionar validação
+  explícita (`ValueError` claro) antes de carregar uma segunda empresa.
+- **CLIs devolvem traceback do Python cru** para ticker/banco inexistente
+  (`dcf_engine.py`, `target_price.py`, `sensitivity.py`) — funciona, mas
+  não é uma mensagem amigável. Baixa prioridade, mas fácil de arrumar
+  (`try/except` no `main()` de cada CLI).
+- **Sem CI.** Os 17 testes em `tests/test_valuation.py` só rodam quando
+  alguém lembra de rodar `pytest` — os três bugs desta revisão só foram
+  achados porque testei manualmente depois do fato. Um workflow simples
+  do GitHub Actions (`pytest` a cada push/PR) fecharia esse buraco.
+- **Terceiro heatmap de sensibilidade (Beta × Risk-Free Rate)** existe na
+  planilha original (linhas 120–126) mas não foi replicado em
+  `sensitivity.py`/`app.py`.
+- **`data/valuation.db` acumula estado no servidor** quando `app.py` está
+  hospedado para mais de um usuário — o upload grava direto no arquivo
+  configurado em "Banco de dados", compartilhado entre todas as sessões
+  apontando pro mesmo caminho. Bom para uso pessoal/local; para expor a
+  um time, vale isolar por sessão ou trocar por um banco por usuário.
