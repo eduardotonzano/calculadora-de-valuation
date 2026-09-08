@@ -349,7 +349,7 @@ with tab_summary:
         "$388.54 (5 anos, validado) vs. $412.19 (13 anos)."
     )
     note(
-        "<b>As duas tabelas de sensibilidade da planilha não concordam entre si nem com "
+        "<b>As três tabelas de sensibilidade da planilha não concordam entre si nem com "
         "a célula principal.</b> Ver aba Sensibilidade e Metodologia para a tabela "
         "completa de comparação."
     )
@@ -694,16 +694,19 @@ célula a célula contra o arquivo original — representa. O parâmetro
 `explicit_years` (exposto aqui como "Anos de projeção explícita") permite
 rodar a versão de 13 anos lado a lado.
 
-### Achado 2 — as duas tabelas de sensibilidade da planilha usam fórmulas diferentes entre si
+### Achado 2 — as três tabelas de sensibilidade da planilha usam fórmulas diferentes entre si
 
 Ver aba Sensibilidade para a tabela de comparação completa. Em resumo: a
-célula principal (`C87`), a Tabela 1 de sensibilidade (`D96`) e a Tabela 2 de
-sensibilidade (`D110`) dão três números diferentes no mesmo cenário base —
-$388.54, $313.31 e $412.19, respectivamente — porque cada uma usa uma
-combinação distinta de "quantos anos somar" e "em que ano ancorar o valor
-terminal". `sensitivity.py` não reproduz nenhuma dessas inconsistências: ele
-sempre chama `dcf_engine.run_dcf()`, então qualquer célula de qualquer grid
-aqui é diretamente comparável ao preço-alvo do DCF mostrado na aba Sumário.
+célula principal (`C87`), a Tabela 1 de sensibilidade (`D96`), a Tabela 2 de
+sensibilidade (`D110`) e a Tabela 3 de sensibilidade (`D124`) dão números
+diferentes no mesmo cenário base — $388.54, $313.31, $412.19 e $313.31 de
+novo, respectivamente — porque cada uma usa uma combinação distinta de
+"quantos anos somar" e "em que ano ancorar o valor terminal" (a Tabela 3
+repete o número da Tabela 1 porque usa exatamente a mesma fórmula,
+só que sensibilizando Risk-Free/Beta em vez do WACC direto).
+`sensitivity.py` não reproduz nenhuma dessas inconsistências: ele sempre
+chama `dcf_engine.run_dcf()`, então qualquer célula de qualquer grid aqui
+é diretamente comparável ao preço-alvo do DCF mostrado na aba Sumário.
 
 ### Onde está cada cálculo no código
 
@@ -717,6 +720,7 @@ aqui é diretamente comparável ao preço-alvo do DCF mostrado na aba Sumário.
 | PEG (múltiplos) | `target_price.from_peg()` |
 | Sensibilidade WACC × Múltiplo | `sensitivity.sensitivity_wacc_exit_multiple()` |
 | Sensibilidade Crescimento × Margem | `sensitivity.sensitivity_growth_margin()` |
+| Sensibilidade Risk-Free × Beta | `sensitivity.sensitivity_beta_risk_free()` |
 
 Leitura completa dos dois achados, com as fórmulas originais do Excel
 citadas célula a célula, está em `README.md` no repositório.
