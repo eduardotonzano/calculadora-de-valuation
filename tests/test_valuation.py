@@ -19,7 +19,12 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from data.load_from_modl import derive_scenario_assumptions, load_workbook_data, write_to_db
+from data.load_from_modl import (
+    _numeric_or_none,
+    derive_scenario_assumptions,
+    load_workbook_data,
+    write_to_db,
+)
 from dcf_engine import get_company_id, get_wacc, run_dcf
 from sensitivity import (
     sensitivity_beta_risk_free,
@@ -385,7 +390,7 @@ def _build_mode_b_workbook(path: Path) -> None:
             ws[f"{col}{row}"] = record[key]
 
     for col, record, year in zip(cols, _synthetic_historicals(), YEARS):
-        ws[f"{col}3"] = "FY Rep" if record["period_type"] == "actual" else "FY Fwd"
+        ws[f"{col}3"] = f"{year} A (Rep)" if record["period_type"] == "actual" else f"{year} A (Fwd)"
         ws[f"{col}4"] = date(year, 12, 31)
 
     wb.save(path)
@@ -441,3 +446,146 @@ def test_mode_b_company_round_trips_through_db_and_football_field(tmp_path):
             from_pe(conn, "TEST US", target_year=2027)
     finally:
         conn.close()
+
+
+# ------------------------------- label-only export (no field codes at all) --
+# A raw "Company Financial (Multiple Periods)" export saved straight from
+# Bloomberg's on-screen grid -- rather than the field-code-driven MODL
+# template -- has no BDH-style field-code column (column B holds the first
+# year's data, not a code) and its tab can be named anything (e.g. the
+# spreadsheet app's own default "Sheet1"), found by matching "(Multiple
+# Periods)" in the sheet's own A1 title text instead. Found by testing
+# against a real third-party file (a Bloomberg export of Alphabet/GOOGL
+# saved without any manual renaming) -- built here as a minimal synthetic
+# workbook, never committing that real file.
+
+LABEL_YEARS = [2024, 2025, 2026, 2027]  # 2 actual + 2 estimate
+LABEL_ACTUAL_YEARS = LABEL_YEARS[:2]
+LABEL_COLS = ["B", "C", "D", "E"]  # starts at B, not E -- no field-code column to skip
+
+
+def _build_label_only_workbook(path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"  # deliberately NOT "Multiple Periods" -- title-only detection
+    ws["A1"] = "Test Corp- Company Financial (Multiple Periods)"
+    ws["A2"] = "TEST US Equity    Periodicity:A    Currency:USD"
+
+    for col, year in zip(LABEL_COLS, LABEL_YEARS):
+        ws[f"{col}3"] = f"{year} A (Rep)" if year in LABEL_ACTUAL_YEARS else f"{year} A (Fwd)"
+        ws[f"{col}4"] = date(year, 12, 31)
+
+    # (row, indent depth, label)
+    rows = [
+        (10, 1, "Income Statement"),
+        (11, 1, "Total Revenue"),
+        (12, 1, "Operating Income"),
+        (13, 2, "EBITDA"),
+        (14, 1, "Depreciation & Amortization"),
+        (15, 2, "Interest Expense"),
+        (16, 1, "Pre-Tax Income"),
+        (17, 1, "Income Tax Expense"),
+        (18, 1, "Net Income"),  # the one that should be picked (depth 1)
+        (19, 2, "Net Income"),  # decoy at a different depth -- must NOT be picked
+        (20, 1, "Diluted Weighted Avg. Shares"),
+        (21, 1, "Diluted EPS"),  # GAAP decoy -- must NOT be picked
+        (22, 2, "Diluted EPS"),  # adjusted -- the one that should be picked
+        (30, 1, "Condensed Balance Sheet"),
+        (31, 3, "Cash Cash Equivalents and Short term Investments"),
+        (32, 3, "Long-Term Debt"),
+        (40, 1, "Condensed Cash Flow Statement"),
+        (41, 2, "Capital Expenditures"),
+        (42, 2, "Changes in Working Capital"),  # left blank -- sum_child_rows() must fill it
+        (43, 3, "Accounts Receivables"),
+        (44, 3, "Accounts Payable"),
+    ]
+    for row, depth, label in rows:
+        ws.cell(row=row, column=1, value="  " * depth + label)
+
+    revenues = [1000 * (1.1 ** i) for i in range(4)]
+    for col, revenue in zip(LABEL_COLS, revenues):
+        ebit = revenue * 0.2
+        da = revenue * 0.05
+        pretax = ebit * 0.9
+        tax = pretax * 0.21
+        net_income = pretax - tax
+        shares = 100.0
+        ws[f"{col}11"] = revenue
+        ws[f"{col}12"] = ebit
+        ws[f"{col}13"] = revenue * 0.28  # ebitda_adjusted, distinct from ebit+da on purpose
+        ws[f"{col}14"] = da
+        ws[f"{col}15"] = revenue * 0.01  # gross interest expense
+        ws[f"{col}16"] = pretax
+        ws[f"{col}17"] = tax
+        ws[f"{col}18"] = net_income
+        ws[f"{col}19"] = net_income * 1.05  # decoy value -- must not be read
+        ws[f"{col}20"] = shares
+        ws[f"{col}21"] = net_income / shares * 0.90  # GAAP decoy -- must not be read
+        ws[f"{col}22"] = net_income / shares * 0.95  # adjusted -- must be read
+        ws[f"{col}31"] = revenue * 0.1  # cash
+        ws[f"{col}32"] = 500.0  # long-term debt
+        ws[f"{col}41"] = -revenue * 0.05  # capex
+        # row 42 ("Changes in Working Capital") intentionally left blank
+        ws[f"{col}43"] = -50.0
+        ws[f"{col}44"] = 20.0
+
+    wb.save(path)
+
+
+def test_numeric_or_none_normalizes_blank_string():
+    assert _numeric_or_none("") is None
+    assert _numeric_or_none("   ") is None
+    assert _numeric_or_none(0) == 0
+    assert _numeric_or_none(12.5) == 12.5
+    assert _numeric_or_none(None) is None
+
+
+def test_load_workbook_data_label_only_export(tmp_path):
+    path = tmp_path / "label_only.xlsx"
+    _build_label_only_workbook(path)
+    market_data = {"risk_free_rate": 0.04, "beta": 1.1, "equity_risk_premium": 0.045, "stock_price": 40.0}
+
+    data = load_workbook_data(path, market_data=market_data)
+
+    assert data["ticker"] == "TEST US"
+    assert data["name"] == "Test Corp"
+    assert data["data_source"] == "derived"
+    assert len(data["historicals"]) == 4
+    assert [h["fiscal_year"] for h in data["historicals"]] == LABEL_YEARS
+    assert [h["period_type"] for h in data["historicals"]] == ["actual", "actual", "estimate", "estimate"]
+
+    fy2024 = data["historicals"][0]
+    revenue = 1000.0
+    ebit = revenue * 0.2
+    pretax = ebit * 0.9
+    tax = pretax * 0.21
+    net_income = pretax - tax
+    # The depth-1 "Net Income" is read, not the depth-2 decoy right below it.
+    assert fy2024["net_income"] == pytest.approx(net_income)
+    # The depth-2 "Diluted EPS" (adjusted) is read, not the depth-1 GAAP decoy.
+    assert fy2024["eps_diluted_adjusted"] == pytest.approx(net_income / 100.0 * 0.95)
+    # Gross interest expense (row 15), not a net-of-interest-income figure.
+    assert fy2024["interest_expense"] == pytest.approx(revenue * 0.01)
+    # "Changes in Working Capital" itself was left blank -- summed from its
+    # two child rows (Accounts Receivables -50, Accounts Payable +20).
+    assert fy2024["nwc_change"] == pytest.approx(-30.0)
+    assert fy2024["long_term_debt"] == pytest.approx(500.0)
+    assert fy2024["net_debt"] == pytest.approx(500.0 - revenue * 0.1)
+
+
+def test_load_workbook_data_label_only_export_rejects_missing_section(tmp_path):
+    """A workbook with no Bloomberg field codes AND missing one of the three
+    expected statement sections isn't a layout this loader recognizes --
+    it should say so, not silently return wrong numbers or a cryptic
+    AttributeError."""
+    path = tmp_path / "no_cash_flow_section.xlsx"
+    _build_label_only_workbook(path)
+
+    wb = openpyxl.load_workbook(path)
+    ws = wb["Sheet1"]
+    ws["A40"] = None  # remove the "Condensed Cash Flow Statement" header
+    wb.save(path)
+
+    market_data = {"risk_free_rate": 0.04, "beta": 1.1, "equity_risk_premium": 0.045, "stock_price": 40.0}
+    with pytest.raises(ValueError, match="Condensed Cash Flow Statement"):
+        load_workbook_data(path, market_data=market_data)
