@@ -165,8 +165,20 @@ def parse_as_of_date(dcf_ws) -> str | None:
     return datetime.strptime(match.group(1), "%m/%d/%Y").date().isoformat()
 
 
+REQUIRED_SHEETS = ("Multiple Periods", "DCF", "WACC")
+
+
 def load_workbook_data(xlsx_path: Path) -> dict:
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+    missing = [name for name in REQUIRED_SHEETS if name not in wb.sheetnames]
+    if missing:
+        raise ValueError(
+            f"This workbook only has {wb.sheetnames}, missing {missing}. "
+            "A full valuation needs all three: 'Multiple Periods' for historicals, "
+            "'DCF' for the Bear/Base/Bull scenario assumptions and terminal exit "
+            "multiple, and 'WACC' for the CAPM inputs — historicals alone aren't "
+            "enough to run dcf_engine.py, target_price.py, or sensitivity.py."
+        )
     dcf_ws = wb["DCF"]
     mp_ws = wb["Multiple Periods"]
     wacc_ws = wb["WACC"]
