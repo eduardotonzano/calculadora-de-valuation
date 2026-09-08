@@ -403,13 +403,24 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: s
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
 
+def migrate_schema(conn: sqlite3.Connection, schema_path: Path) -> None:
+    """Bring a database's schema up to date: create any missing tables
+    (schema.sql uses CREATE TABLE IF NOT EXISTS) and add any columns
+    added since the database was first created. Safe to call on every
+    connection, not just on load -- a database that was populated before
+    a column existed (e.g. the committed data/valuation.db before
+    data_source was added) would otherwise crash the first time
+    something reads that column, even without a new upload."""
+    conn.executescript(schema_path.read_text())
+    conn.execute("PRAGMA foreign_keys = ON")
+    _ensure_column(conn, "historicals", "shares_diluted", "REAL")
+    _ensure_column(conn, "companies", "data_source", "TEXT NOT NULL DEFAULT 'modl_tabs'")
+
+
 def write_to_db(db_path: Path, schema_path: Path, data: dict) -> None:
     conn = sqlite3.connect(db_path)
     try:
-        conn.executescript(schema_path.read_text())
-        conn.execute("PRAGMA foreign_keys = ON")
-        _ensure_column(conn, "historicals", "shares_diluted", "REAL")
-        _ensure_column(conn, "companies", "data_source", "TEXT NOT NULL DEFAULT 'modl_tabs'")
+        migrate_schema(conn, schema_path)
 
         existing = conn.execute(
             "SELECT id FROM companies WHERE ticker = ?", (data["ticker"],)
