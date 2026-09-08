@@ -16,7 +16,7 @@ Bloomberg MODL (`.xlsx`), carregadas em um banco SQLite.
 | `target_price.py` | Pronto — `from_ev_ebitda()`, `from_pe()`, `from_peg()` |
 | `sensitivity.py` | Pronto — tabelas WACC × múltiplo, crescimento × margem, e risk-free × beta |
 | `app.py` (Streamlit) | Pronto — abre todos os cálculos, não só o resultado final |
-| `tests/test_valuation.py` + CI | Pronto — 22 testes `pytest`, rodando no GitHub Actions a cada push/PR |
+| `tests/test_valuation.py` + CI | Pronto — 23 testes `pytest`, rodando no GitHub Actions a cada push/PR |
 
 Rode para confirmar que tudo está funcionando:
 
@@ -26,7 +26,7 @@ python dcf_engine.py data/valuation.db "APP US" base
 # ... Price per share: $388.54
 python target_price.py data/valuation.db "APP US" base
 
-# suite de regressão (22 testes) — cobre o caso base, os limites de
+# suite de regressão (23 testes) — cobre o caso base, os limites de
 # explicit_years, a lacuna de cobertura do P/E e o isolamento multi-empresa
 pip install -r requirements-dev.txt
 pytest
@@ -273,7 +273,7 @@ código). A revisão achou e corrigiu três bugs reais:
 
 Os três casos (mais o isolamento entre empresas num banco multi-empresa,
 testado com uma segunda empresa clonada) viraram testes automatizados em
-`tests/test_valuation.py` (`pytest`, 22 casos, todos passando) para não
+`tests/test_valuation.py` (`pytest`, 23 casos, todos passando) para não
 regredir.
 
 ## Sugestões implementadas
@@ -297,7 +297,7 @@ externos foram implementadas:
   com código 1 em vez de um traceback cru para ticker/banco inexistente
   ou parâmetros inválidos.
 - **CI no GitHub Actions** (`.github/workflows/tests.yml`) rodando a cada
-  push/PR: compila todos os módulos, roda os 22 testes de
+  push/PR: compila todos os módulos, roda os 23 testes de
   `tests/test_valuation.py`, e faz um smoke test das três CLIs contra o
   `data/valuation.db` versionado. Os bugs desta revisão só tinham sido
   achados porque testei manualmente depois do fato — agora regressões
@@ -318,16 +318,27 @@ externos foram implementadas:
   local de uma pessoa só continua carregando `data/valuation.db`
   diretamente).
 
-## O que ainda falta
+## Testado com uma segunda empresa real
 
-Um item genuinamente fora de alcance nesta sessão, por depender de dado
-externo que não tenho:
+O item que tinha ficado de fora por depender de dado externo foi
+fechado: testei o upload com o export Bloomberg MODL de uma segunda
+empresa real (Blackstone, BX US). O resultado já valeu a pena — esse
+arquivo só tinha a aba `Multiple Periods` (sem `DCF` nem `WACC`), e
+`load_workbook_data()` acessava `wb["DCF"]`/`wb["WACC"]` direto, sem
+checar se existiam. O usuário via um `KeyError` cru do openpyxl
+("Worksheet DCF does not exist.") na barra lateral — não quebrava o app
+(o `try/except` do upload já cobria isso), mas não explicava nada.
 
-- **Testar com uma segunda empresa real.** O schema e o motor são
-  multi-empresa por design, e o isolamento entre empresas foi validado
-  com um clone sintético (`tests/test_valuation.py`), mas nunca com um
-  segundo arquivo `.xlsx` de verdade — só a AppLovin foi carregada até
-  agora. Vale carregar um peer (ex. outro ad-tech) para achar premissas
-  do parser que só aparecem com dados diferentes dos da AppLovin (ex.
-  uma empresa sem dívida, que agora falha alto e claro graças à guarda
-  acima, em vez de silenciosamente).
+Agora `load_workbook_data()` confere as três abas logo no início e
+levanta um `ValueError` claro dizendo quais faltam e por quê ("historicals
+sozinho não é suficiente para rodar dcf_engine.py/target_price.py/
+sensitivity.py"). Coberto por um teste com uma planilha sintética mínima
+(`tests/test_valuation.py`), sem precisar versionar o arquivo real de
+terceiros no repositório.
+
+De quebra, essa segunda empresa confirmou que o parser já era robusto a
+uma variação real que a AppLovin não tinha: a BX só tem 4 anos de
+consenso (FY2026E–FY2029E) contra 5 da AppLovin, e a fronteira
+"Fwd"/"Rep" cai numa coluna diferente (`I` em vez de `J`) — `load_from_modl.py`
+já lê isso dinamicamente pelo rótulo de cada coluna (`period_type_for_column()`),
+não por posição fixa, então essa parte funcionou sem nenhuma mudança.

@@ -15,8 +15,10 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+import openpyxl
 import pytest
 
+from data.load_from_modl import load_workbook_data
 from dcf_engine import get_company_id, get_wacc, run_dcf
 from sensitivity import (
     sensitivity_beta_risk_free,
@@ -248,3 +250,21 @@ def test_sensitivity_beta_risk_free_center_cell_matches_dcf(conn):
     table = sensitivity_beta_risk_free(conn, TICKER, "base", explicit_years=5)
     center = table["grid"][2][2]  # zero risk-free delta, zero beta delta
     assert center == pytest.approx(dcf_price)
+
+
+# ------------------------------------------- load_from_modl() sheet check --
+
+def test_load_workbook_data_rejects_missing_sheets(tmp_path):
+    """Found by testing against a real second company's Bloomberg export
+    (Blackstone) that only had a 'Multiple Periods' tab: without this
+    check, openpyxl's own bare KeyError ('Worksheet DCF does not exist.')
+    reached the user with no explanation of what's actually missing or why
+    it matters. Built here as a minimal synthetic workbook rather than
+    committing a real third-party Bloomberg export."""
+    wb = openpyxl.Workbook()
+    wb.active.title = "Multiple Periods"
+    path = tmp_path / "historicals_only.xlsx"
+    wb.save(path)
+
+    with pytest.raises(ValueError, match="DCF.*WACC|WACC.*DCF"):
+        load_workbook_data(path)
