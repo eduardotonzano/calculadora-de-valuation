@@ -13,6 +13,7 @@ Run with:  streamlit run app.py
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from data.load_from_modl import load_workbook_data, write_to_db
 from dcf_engine import get_company_id, get_wacc, run_dcf
 from sensitivity import sensitivity_growth_margin, sensitivity_wacc_exit_multiple
 from target_price import from_ev_ebitda, from_pe, from_peg
@@ -27,6 +29,7 @@ from target_price import from_ev_ebitda, from_pe, from_peg
 st.set_page_config(page_title="Calculadora de Valuation", layout="wide")
 
 DEFAULT_DB_PATH = "data/valuation.db"
+SCHEMA_PATH = Path(__file__).parent / "data" / "schema.sql"
 TARGET_YEAR_OPTIONS = [2026, 2027, 2028, 2029, 2030]  # bounded by Street-consensus EPS coverage
 
 # Cached from the source Bloomberg MODL workbook (AppLovin, base case, WACC/multiple
@@ -143,18 +146,54 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 st.sidebar.title("Calculadora de Valuation")
 
-db_path = st.sidebar.text_input("Banco de dados (.db)", value=DEFAULT_DB_PATH)
+with st.sidebar.expander("Banco de dados", expanded=False):
+    db_path = st.text_input("Caminho do .db", value=DEFAULT_DB_PATH)
+    st.caption("Onde o arquivo enviado abaixo é gravado/lido. O schema é multi-empresa: cada envio soma ao banco, não substitui.")
+
+st.sidebar.subheader("Enviar planilha Bloomberg MODL")
+uploaded_file = st.sidebar.file_uploader(
+    "Arquivo .xlsx (abas Multiple Periods, DCF, WACC)", type=["xlsx"],
+)
+
+if uploaded_file is not None:
+    file_signature = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+    if st.session_state.get("last_upload_signature") != file_signature:
+        try:
+            data = load_workbook_data(uploaded_file)
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            write_to_db(Path(db_path), SCHEMA_PATH, data)
+        except Exception as exc:  # noqa: BLE001 — surface any parse/load failure to the user
+            st.sidebar.error(f"Falha ao carregar o arquivo: {exc}")
+        else:
+            st.session_state.last_upload_signature = file_signature
+            st.session_state.last_uploaded_ticker = data["ticker"]
+            get_connection.clear()
+            st.sidebar.success(f"{data['ticker']} ({data['name']}) carregado em `{db_path}`.")
+            st.rerun()
+
+st.sidebar.divider()
+
 if not Path(db_path).exists():
-    st.error(f"Banco não encontrado: `{db_path}`. Rode `data/load_from_modl.py` primeiro.")
+    st.info(
+        f"Nenhum banco encontrado ainda em `{db_path}`. Envie um arquivo Bloomberg "
+        f"MODL (.xlsx) na barra lateral para gerá-lo e calcular tudo automaticamente."
+    )
     st.stop()
 
 conn = get_connection(db_path)
 tickers = list_tickers(conn)
 if not tickers:
-    st.error("Nenhuma empresa carregada nesse banco.")
+    st.info(
+        "O banco em `{}` existe mas ainda não tem nenhuma empresa carregada. "
+        "Envie um arquivo Bloomberg MODL (.xlsx) na barra lateral.".format(db_path)
+    )
     st.stop()
 
-ticker = st.sidebar.selectbox("Empresa", tickers)
+default_ticker_index = 0
+if st.session_state.get("last_uploaded_ticker") in tickers:
+    default_ticker_index = tickers.index(st.session_state["last_uploaded_ticker"])
+
+ticker = st.sidebar.selectbox("Empresa", tickers, index=default_ticker_index)
 scenario = st.sidebar.radio("Cenário", ["bear", "base", "bull"], index=1, horizontal=True)
 explicit_years = st.sidebar.radio(
     "Anos de projeção explícita (DCF)",

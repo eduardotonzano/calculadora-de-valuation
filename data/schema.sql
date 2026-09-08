@@ -7,7 +7,7 @@
 
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE companies (
+CREATE TABLE IF NOT EXISTS companies (
     id          INTEGER PRIMARY KEY,
     ticker      TEXT NOT NULL UNIQUE,      -- e.g. 'APP US'
     name        TEXT NOT NULL,
@@ -19,7 +19,7 @@ CREATE TABLE companies (
 -- Annual actuals (period_type='actual') and Street-consensus estimates
 -- (period_type='estimate'), one row per fiscal year, straight off the
 -- "Multiple Periods" sheet of the Bloomberg MODL template.
-CREATE TABLE historicals (
+CREATE TABLE IF NOT EXISTS historicals (
     id                    INTEGER PRIMARY KEY,
     company_id            INTEGER NOT NULL REFERENCES companies(id),
     fiscal_year           INTEGER NOT NULL,
@@ -44,7 +44,7 @@ CREATE TABLE historicals (
 -- dcf_engine.py from the latest actual year in `historicals`
 -- (long_term_debt, interest_expense, tax_expense/pretax_income) rather than
 -- duplicated here.
-CREATE TABLE wacc_inputs (
+CREATE TABLE IF NOT EXISTS wacc_inputs (
     id                    INTEGER PRIMARY KEY,
     company_id            INTEGER NOT NULL REFERENCES companies(id),
     risk_free_rate        REAL NOT NULL,    -- 10Y Treasury
@@ -59,7 +59,7 @@ CREATE TABLE wacc_inputs (
 -- Bear/Base/Bull blocks on the DCF sheet: revenue growth, EBIT margin,
 -- tax rate, D&A and CapEx as % of revenue, and NWC impact as % of the
 -- change in revenue.
-CREATE TABLE scenario_assumptions (
+CREATE TABLE IF NOT EXISTS scenario_assumptions (
     id                     INTEGER PRIMARY KEY,
     company_id             INTEGER NOT NULL REFERENCES companies(id),
     scenario               TEXT NOT NULL CHECK (scenario IN ('bear', 'base', 'bull')),
@@ -77,7 +77,7 @@ CREATE TABLE scenario_assumptions (
 -- is an explicit input in the source file; the Gordon Growth rate is a
 -- cross-check dcf_engine.py backs out from the exit-multiple terminal
 -- value (see README.md).
-CREATE TABLE terminal_assumptions (
+CREATE TABLE IF NOT EXISTS terminal_assumptions (
     id                    INTEGER PRIMARY KEY,
     company_id            INTEGER NOT NULL REFERENCES companies(id),
     scenario              TEXT NOT NULL CHECK (scenario IN ('bear', 'base', 'bull')),
@@ -89,7 +89,7 @@ CREATE TABLE terminal_assumptions (
 -- "TRADING MULTIPLES" block (current market cap/EV over forward consensus
 -- metrics). Used as reference points for target_price.py, not fabricated
 -- peer-comp data.
-CREATE TABLE trading_comps (
+CREATE TABLE IF NOT EXISTS trading_comps (
     id            INTEGER PRIMARY KEY,
     company_id    INTEGER NOT NULL REFERENCES companies(id),
     metric        TEXT NOT NULL,    -- 'PE', 'EV_EBITDA', 'FCF_YIELD', 'PEG'
