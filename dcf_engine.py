@@ -96,10 +96,22 @@ def get_wacc(conn: sqlite3.Connection, company_id: int) -> dict:
     }
 
 
-def project_financials(conn: sqlite3.Connection, company_id: int, scenario: str) -> list[dict]:
+def project_financials(
+    conn: sqlite3.Connection,
+    company_id: int,
+    scenario: str,
+    growth_delta: float = 0.0,
+    margin_delta: float = 0.0,
+) -> list[dict]:
     """Project revenue and unlevered FCF for all 13 forecast years
     (FY2026-FY2038) from scenario_assumptions, seeded off the latest actual
-    year's revenue."""
+    year's revenue.
+
+    `growth_delta`/`margin_delta` shift every year's revenue growth / EBIT
+    margin by a flat amount (used by sensitivity.py), matching how the
+    source file's own Growth x Margin sensitivity table perturbs both
+    assumptions uniformly across the projection.
+    """
     conn.row_factory = sqlite3.Row
     latest_actual = dict(conn.execute(
         """SELECT * FROM historicals WHERE company_id = ? AND period_type = 'actual'
@@ -121,8 +133,8 @@ def project_financials(conn: sqlite3.Connection, company_id: int, scenario: str)
     prior_revenue = latest_actual["revenue"]
     for row in assumptions:
         a = dict(row)
-        revenue = prior_revenue * (1 + a["revenue_growth"])
-        ebit = revenue * a["ebit_margin"]
+        revenue = prior_revenue * (1 + a["revenue_growth"] + growth_delta)
+        ebit = revenue * (a["ebit_margin"] + margin_delta)
         taxes = -ebit * a["tax_rate"]
         nopat = ebit + taxes
         da = revenue * a["da_pct_revenue"]
@@ -179,21 +191,32 @@ def run_dcf(
     scenario: str,
     explicit_years: int = 5,
     gordon_growth_rate: float | None = None,
+    wacc_override: float | None = None,
+    exit_multiple_override: float | None = None,
+    growth_delta: float = 0.0,
+    margin_delta: float = 0.0,
 ) -> dict:
+    """Run the DCF. `wacc_override`/`exit_multiple_override`/`growth_delta`/
+    `margin_delta` let sensitivity.py perturb one input at a time while
+    reusing this exact formula, so a sensitivity table's zero-delta cell
+    always reconciles to this function's own base-case output."""
     if scenario not in ("bear", "base", "bull"):
         raise ValueError(f"scenario must be 'bear', 'base', or 'bull', got {scenario!r}")
 
     company_id = get_company_id(conn, ticker)
     wacc_data = get_wacc(conn, company_id)
-    wacc = wacc_data["wacc"]
+    wacc = wacc_override if wacc_override is not None else wacc_data["wacc"]
 
-    exit_multiple = conn.execute(
-        """SELECT exit_multiple_ebitda FROM terminal_assumptions
-           WHERE company_id = ? AND scenario = ?""",
-        (company_id, scenario),
-    ).fetchone()[0]
+    if exit_multiple_override is not None:
+        exit_multiple = exit_multiple_override
+    else:
+        exit_multiple = conn.execute(
+            """SELECT exit_multiple_ebitda FROM terminal_assumptions
+               WHERE company_id = ? AND scenario = ?""",
+            (company_id, scenario),
+        ).fetchone()[0]
 
-    projection = project_financials(conn, company_id, scenario)
+    projection = project_financials(conn, company_id, scenario, growth_delta, margin_delta)
     discounted = discount_cash_flows(projection, wacc, explicit_years)
 
     sum_pv_ufcf = sum(y["pv_ufcf"] for y in discounted)
@@ -219,6 +242,7 @@ def run_dcf(
         "explicit_years": explicit_years,
         "total_projected_years": len(projection),
         "wacc": wacc_data,
+        "wacc_used": wacc,
         "projection": projection,
         "discounted_cash_flows": discounted,
         "sum_pv_ufcf": sum_pv_ufcf,
@@ -239,7 +263,7 @@ def run_dcf(
 
 def print_summary(result: dict) -> None:
     print(f"{result['ticker']} — DCF ({result['scenario']} case)")
-    print(f"  WACC: {result['wacc']['wacc']:.4%}")
+    print(f"  WACC: {result['wacc_used']:.4%}")
     print(
         f"  Explicit projection used: {result['explicit_years']} of "
         f"{result['total_projected_years']} projected years"

@@ -14,7 +14,7 @@ Bloomberg MODL (`.xlsx`), carregadas em um banco SQLite.
 | `data/valuation.db` | Populado com AppLovin (APP US) |
 | `dcf_engine.py` | Pronto, output validado célula a célula ($388.54 no caso base) |
 | `target_price.py` | Pronto — `from_ev_ebitda()`, `from_pe()`, `from_peg()` |
-| `sensitivity.py` | Não iniciado |
+| `sensitivity.py` | Pronto — tabelas WACC × múltiplo de saída e crescimento × margem |
 | Interface Streamlit | Não iniciada |
 
 Rode para confirmar que tudo está funcionando:
@@ -70,6 +70,47 @@ premissas cai depois do horizonte de consenso, enquanto 13 anos captura
 o fade completo que a própria planilha já modela. O importante é não
 alegar "13 anos de projeção explícita" numa tese enquanto o número
 usado na prática só reflete 5.
+
+## Segunda descoberta: as duas tabelas de sensibilidade do arquivo original nem concordam entre si
+
+Ao construir `sensitivity.py` reproduzindo as tabelas "SENSITIVITY 1:
+WACC vs. TERMINAL EXIT MULTIPLE" (linhas 92–98) e "SENSITIVITY 2:
+REVENUE GROWTH Δ vs. EBIT MARGIN Δ" (linhas 106–112) da aba `DCF`,
+descobri que nenhuma das duas usa a mesma fórmula da célula principal
+(`C87` = $388.54). E elas também não usam a mesma fórmula *entre si*.
+Na célula de "delta zero" (WACC/múltiplo base, ou crescimento/margem
+base) cada uma dá um número diferente:
+
+| Fonte | Fórmula | Preço-alvo (base) |
+|---|---|---|
+| `C87` (DCF principal) | soma PV do FCF dos anos 1–5; valor terminal = EBITDA do ano 5, descontado no período do ano 5 | **$388.54** |
+| Tabela 1 (WACC × Múltiplo), célula `D96` | soma PV do FCF dos **13 anos**; valor terminal ainda usa o EBITDA (desatualizado) **do ano 5**, mas descontado no período do **ano 13** | **$313.31** |
+| Tabela 2 (Crescimento × Margem), célula `D110` | soma PV do FCF dos **13 anos**; valor terminal usa o EBITDA **do ano 13**, descontado no período do **ano 13** | **$412.19** |
+
+A Tabela 2 é internamente consistente (é a mesma matemática de somar os
+13 anos completos com o terminal alinhado ao último ano — o mesmo
+resultado que `dcf_engine.run_dcf(..., explicit_years=13)` produz). A
+Tabela 1 é a mais problemática das três: soma 13 anos de FCF mas ainda
+ancora o EBITDA terminal no ano 5, e desconta esse valor terminal
+desatualizado 8 anos além do que deveria — um erro que não é conservador
+nem agressivo, é simplesmente inconsistente com qualquer definição
+única de "quantos anos de projeção explícita" o modelo usa.
+
+Diante disso, `sensitivity.py` **não** replica nenhuma dessas duas
+variantes da planilha. Em vez disso, os dois grids são construídos
+chamando `dcf_engine.run_dcf()` diretamente, perturbando um par de
+inputs por vez — então a célula de delta zero de qualquer um dos dois
+grids sempre bate exatamente com a saída do próprio `run_dcf()` para o
+mesmo cenário/`explicit_years` (por padrão, $388.54). Isso garante que
+uma tabela de sensibilidade sempre reconcilia com o caso-base que ela
+está "sensibilizando" — o que a planilha original, surpreendentemente,
+não garante.
+
+Como checagem cruzada: rodando `sensitivity.py` com `--explicit-years 13`,
+o grid de Crescimento × Margem bate célula a célula com a Tabela 2 do
+arquivo original (ex.: delta -8%/-4% = $204.30, delta +8%/+4% = $865.46),
+confirmando que a implementação é equivalente à única das duas tabelas
+originais que é internamente consistente.
 
 ## Estrutura de dados (`data/schema.sql`)
 
@@ -128,6 +169,13 @@ extremo (~45x) e, por consequência, um preço-alvo bem acima dos demais
 métodos — isso é uma limitação conhecida da regra PEG=1 em hypergrowth,
 não um bug. `target_peg` é parametrizável para testar outros patamares.
 
+`sensitivity.py` segue o mesmo princípio de reaproveitamento: em vez de
+reimplementar a matemática do DCF, ele chama `dcf_engine.run_dcf()` uma
+vez por célula da grade, passando `wacc_override`/`exit_multiple_override`
+(tabela WACC × múltiplo) ou `growth_delta`/`margin_delta` (tabela
+crescimento × margem) — parâmetros adicionados a `run_dcf()` e
+`project_financials()` exatamente para esse reuso.
+
 ## Como rodar
 
 ```bash
@@ -142,13 +190,14 @@ python dcf_engine.py data/valuation.db "APP US" bear --explicit-years 13
 
 # Target price por múltiplos (football field)
 python target_price.py data/valuation.db "APP US" base
+
+# Sensibilidade (WACC x múltiplo, crescimento x margem)
+python sensitivity.py data/valuation.db "APP US" base
+python sensitivity.py data/valuation.db "APP US" base --explicit-years 13
 ```
 
 ## Próximos passos
 
-1. `sensitivity.py` — tabelas de sensibilidade WACC × múltiplo de saída e
-   crescimento de receita × margem EBIT (o arquivo original já tem essas
-   duas tabelas prontas na aba `DCF`, linhas 92–112, que servem de
-   referência para validar a implementação).
-2. Interface Streamlit por cima de `dcf_engine.py` + `target_price.py` +
-   `sensitivity.py`, com seletor de cenário e o football field visual.
+1. Interface Streamlit por cima de `dcf_engine.py` + `target_price.py` +
+   `sensitivity.py`, com seletor de cenário, as duas tabelas de
+   sensibilidade e o football field visual.
