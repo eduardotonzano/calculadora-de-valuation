@@ -15,7 +15,7 @@ Bloomberg MODL (`.xlsx`), carregadas em um banco SQLite.
 | `dcf_engine.py` | Pronto, output validado célula a célula ($388.54 no caso base) |
 | `target_price.py` | Pronto — `from_ev_ebitda()`, `from_pe()`, `from_peg()` |
 | `sensitivity.py` | Pronto — tabelas WACC × múltiplo de saída e crescimento × margem |
-| Interface Streamlit | Não iniciada |
+| `app.py` (Streamlit) | Pronto — abre todos os cálculos, não só o resultado final |
 
 Rode para confirmar que tudo está funcionando:
 
@@ -194,10 +194,51 @@ python target_price.py data/valuation.db "APP US" base
 # Sensibilidade (WACC x múltiplo, crescimento x margem)
 python sensitivity.py data/valuation.db "APP US" base
 python sensitivity.py data/valuation.db "APP US" base --explicit-years 13
+
+# Interface Streamlit
+streamlit run app.py
 ```
+
+## Interface (`app.py`)
+
+Camada de exibição pura sobre `dcf_engine.py`, `target_price.py` e
+`sensitivity.py` — nenhuma conta é refeita na interface, tudo vem dos dicts
+que essas três funções já devolvem. Organizada em abas para abrir os
+cálculos em vez de só mostrar o resultado final:
+
+- **Sumário** — preço-alvo, WACC, g implícito, football field, e os dois
+  achados documentados acima em destaque.
+- **WACC** — CAPM, custo de dívida e estrutura de capital linha a linha,
+  com a fórmula de cada componente ao lado do valor.
+- **Projeção & FCF** — a tabela de 13 anos completa (receita, EBIT, NOPAT,
+  D&A, CapEx, ΔNWC, UFCF), com os anos realmente somados na avaliação
+  destacados em verde e os anos órfãos em vermelho — o achado "5 vs. 13"
+  visível na própria tabela, não só em texto — seguida da tabela de
+  desconto (período, fator, VP do FCF).
+- **Valor Terminal** — EBITDA terminal, os dois métodos (Exit Multiple e
+  Gordon Growth) lado a lado, o cross-check de g implícito, e a ponte de
+  Enterprise Value até preço por ação.
+- **Múltiplos** — `from_ev_ebitda()`, `from_pe()`, `from_peg()`, cada um
+  com fórmula + inputs + resultado.
+- **Sensibilidade** — os dois heatmaps (WACC × múltiplo, crescimento ×
+  margem) mais a grade em números, e a tabela comparando os três preços-alvo
+  divergentes que a própria planilha original produz em "caso base"
+  (C87/D96/D110 — ver "Segunda descoberta" acima).
+- **Metodologia** — a linhagem dos dados e os dois achados por extenso,
+  com a tabela de "onde está cada cálculo no código".
+
+Um detalhe de implementação que rendeu um bug real ao construir os
+heatmaps: o Plotly, ao receber rótulos de eixo com "%" (ex.: `"9.81%"`),
+tenta convertê-los para número e desenha seus próprios ticks arredondados
+(`10, 12, 14...`) em vez de usar os rótulos reais — é preciso forçar
+`xaxis=dict(type="category")` / `yaxis=dict(type="category")` para o eixo
+mostrar os valores verdadeiros da grade.
 
 ## Próximos passos
 
-1. Interface Streamlit por cima de `dcf_engine.py` + `target_price.py` +
-   `sensitivity.py`, com seletor de cenário, as duas tabelas de
-   sensibilidade e o football field visual.
+Nenhum item pendente no escopo original (DCF, target price por múltiplos,
+sensibilidade, interface). Possíveis extensões futuras: suporte a mais de
+uma empresa no mesmo banco (o schema já é multi-empresa; falta só popular
+via `load_from_modl.py` com outro `.xlsx`), upload de `.xlsx` direto pela
+interface, e um terceiro heatmap para o par Beta × Risk-Free Rate que já
+existe na planilha original (linhas 120–126) mas não foi replicado aqui.
