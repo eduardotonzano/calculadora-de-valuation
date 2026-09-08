@@ -14,8 +14,9 @@ Bloomberg MODL (`.xlsx`), carregadas em um banco SQLite.
 | `data/valuation.db` | Populado com AppLovin (APP US) |
 | `dcf_engine.py` | Pronto, output validado célula a célula ($388.54 no caso base) |
 | `target_price.py` | Pronto — `from_ev_ebitda()`, `from_pe()`, `from_peg()` |
-| `sensitivity.py` | Pronto — tabelas WACC × múltiplo de saída e crescimento × margem |
+| `sensitivity.py` | Pronto — tabelas WACC × múltiplo, crescimento × margem, e risk-free × beta |
 | `app.py` (Streamlit) | Pronto — abre todos os cálculos, não só o resultado final |
+| `tests/test_valuation.py` + CI | Pronto — 22 testes `pytest`, rodando no GitHub Actions a cada push/PR |
 
 Rode para confirmar que tudo está funcionando:
 
@@ -25,7 +26,7 @@ python dcf_engine.py data/valuation.db "APP US" base
 # ... Price per share: $388.54
 python target_price.py data/valuation.db "APP US" base
 
-# suite de regressão (17 testes) — cobre o caso base, os limites de
+# suite de regressão (22 testes) — cobre o caso base, os limites de
 # explicit_years, a lacuna de cobertura do P/E e o isolamento multi-empresa
 pip install -r requirements-dev.txt
 pytest
@@ -76,35 +77,40 @@ o fade completo que a própria planilha já modela. O importante é não
 alegar "13 anos de projeção explícita" numa tese enquanto o número
 usado na prática só reflete 5.
 
-## Segunda descoberta: as duas tabelas de sensibilidade do arquivo original nem concordam entre si
+## Segunda descoberta: as três tabelas de sensibilidade do arquivo original nem concordam entre si
 
 Ao construir `sensitivity.py` reproduzindo as tabelas "SENSITIVITY 1:
-WACC vs. TERMINAL EXIT MULTIPLE" (linhas 92–98) e "SENSITIVITY 2:
-REVENUE GROWTH Δ vs. EBIT MARGIN Δ" (linhas 106–112) da aba `DCF`,
-descobri que nenhuma das duas usa a mesma fórmula da célula principal
-(`C87` = $388.54). E elas também não usam a mesma fórmula *entre si*.
-Na célula de "delta zero" (WACC/múltiplo base, ou crescimento/margem
-base) cada uma dá um número diferente:
+WACC vs. TERMINAL EXIT MULTIPLE" (linhas 92–98), "SENSITIVITY 2: REVENUE
+GROWTH Δ vs. EBIT MARGIN Δ" (linhas 106–112) e "SENSITIVITY 3: BETA vs.
+RISK-FREE RATE" (linhas 120–126) da aba `DCF`, descobri que nenhuma das
+três usa a mesma fórmula da célula principal (`C87` = $388.54). E elas
+também não usam a mesma fórmula *entre si*. Na célula de "delta zero"
+(inputs no valor do caso base) cada uma dá um número diferente:
 
 | Fonte | Fórmula | Preço-alvo (base) |
 |---|---|---|
 | `C87` (DCF principal) | soma PV do FCF dos anos 1–5; valor terminal = EBITDA do ano 5, descontado no período do ano 5 | **$388.54** |
 | Tabela 1 (WACC × Múltiplo), célula `D96` | soma PV do FCF dos **13 anos**; valor terminal ainda usa o EBITDA (desatualizado) **do ano 5**, mas descontado no período do **ano 13** | **$313.31** |
 | Tabela 2 (Crescimento × Margem), célula `D110` | soma PV do FCF dos **13 anos**; valor terminal usa o EBITDA **do ano 13**, descontado no período do **ano 13** | **$412.19** |
+| Tabela 3 (Risk-Free × Beta), célula `D124` | mesma fórmula da Tabela 1 (13 anos, EBITDA do ano 5, desconto no ano 13), só que sensibiliza Rf/Beta em vez do WACC direto | **$313.31** |
 
 A Tabela 2 é internamente consistente (é a mesma matemática de somar os
 13 anos completos com o terminal alinhado ao último ano — o mesmo
-resultado que `dcf_engine.run_dcf(..., explicit_years=13)` produz). A
-Tabela 1 é a mais problemática das três: soma 13 anos de FCF mas ainda
-ancora o EBITDA terminal no ano 5, e desconta esse valor terminal
+resultado que `dcf_engine.run_dcf(..., explicit_years=13)` produz). As
+Tabelas 1 e 3 são as mais problemáticas: somam 13 anos de FCF mas ainda
+ancoram o EBITDA terminal no ano 5, e descontam esse valor terminal
 desatualizado 8 anos além do que deveria — um erro que não é conservador
 nem agressivo, é simplesmente inconsistente com qualquer definição
-única de "quantos anos de projeção explícita" o modelo usa.
+única de "quantos anos de projeção explícita" o modelo usa. Não é
+coincidência as duas darem exatamente o mesmo $313.31 no caso base: é a
+mesma fórmula por trás, só que uma sensibiliza o WACC diretamente e a
+outra sensibiliza os dois inputs (Rf, Beta) que compõem o custo de
+equity que entra nesse WACC.
 
-Diante disso, `sensitivity.py` **não** replica nenhuma dessas duas
-variantes da planilha. Em vez disso, os dois grids são construídos
+Diante disso, `sensitivity.py` **não** replica nenhuma dessas três
+variantes da planilha. Em vez disso, os três grids são construídos
 chamando `dcf_engine.run_dcf()` diretamente, perturbando um par de
-inputs por vez — então a célula de delta zero de qualquer um dos dois
+inputs por vez — então a célula de delta zero de qualquer um dos três
 grids sempre bate exatamente com a saída do próprio `run_dcf()` para o
 mesmo cenário/`explicit_years` (por padrão, $388.54). Isso garante que
 uma tabela de sensibilidade sempre reconcilia com o caso-base que ela
@@ -114,7 +120,7 @@ não garante.
 Como checagem cruzada: rodando `sensitivity.py` com `--explicit-years 13`,
 o grid de Crescimento × Margem bate célula a célula com a Tabela 2 do
 arquivo original (ex.: delta -8%/-4% = $204.30, delta +8%/+4% = $865.46),
-confirmando que a implementação é equivalente à única das duas tabelas
+confirmando que a implementação é equivalente à única das três tabelas
 originais que é internamente consistente.
 
 ## Estrutura de dados (`data/schema.sql`)
@@ -225,10 +231,10 @@ cálculos em vez de só mostrar o resultado final:
   Enterprise Value até preço por ação.
 - **Múltiplos** — `from_ev_ebitda()`, `from_pe()`, `from_peg()`, cada um
   com fórmula + inputs + resultado.
-- **Sensibilidade** — os dois heatmaps (WACC × múltiplo, crescimento ×
-  margem) mais a grade em números, e a tabela comparando os três preços-alvo
-  divergentes que a própria planilha original produz em "caso base"
-  (C87/D96/D110 — ver "Segunda descoberta" acima).
+- **Sensibilidade** — os três heatmaps (WACC × múltiplo, crescimento ×
+  margem, risk-free × beta) mais a grade em números, e a tabela comparando
+  os preços-alvo divergentes que a própria planilha original produz em
+  "caso base" (C87/D96/D110/D124 — ver "Segunda descoberta" acima).
 - **Metodologia** — a linhagem dos dados e os dois achados por extenso,
   com a tabela de "onde está cada cálculo no código".
 
@@ -267,45 +273,61 @@ código). A revisão achou e corrigiu três bugs reais:
 
 Os três casos (mais o isolamento entre empresas num banco multi-empresa,
 testado com uma segunda empresa clonada) viraram testes automatizados em
-`tests/test_valuation.py` (`pytest`, 17 casos, todos passando) para não
+`tests/test_valuation.py` (`pytest`, 22 casos, todos passando) para não
 regredir.
 
-## Sugestões — o que falta para amadurecer o projeto
+## Sugestões implementadas
 
-Nenhum item do escopo original (DCF, target price por múltiplos,
-sensibilidade, interface) ficou pendente. O que listo abaixo são lacunas
-reais encontradas na revisão que não bloqueiam o uso atual (só há uma
-empresa carregada, AppLovin), mas que valem a pena antes de tratar isso
-como uma ferramenta de produção com múltiplas empresas/usuários:
+Todas as lacunas encontradas na revisão que dava para fechar sem dados
+externos foram implementadas:
 
-- **Só foi testado com uma empresa real.** O schema e o motor são
-  multi-empresa por design e o isolamento entre empresas foi validado
+- **Guardas de divisão por zero / base negativa em `get_wacc()` e
+  `from_peg()`.** `get_wacc()` agora levanta `ValueError` claro para
+  dívida zero (custo de dívida indefinido), lucro antes de impostos zero
+  (alíquota efetiva indefinida) e enterprise value zero (pesos de
+  capital indefinidos). `from_peg()` valida que o EPS base e o EPS alvo
+  sejam positivos antes de elevar a razão entre eles a uma potência
+  fracionária — antes disso, um EPS-base negativo (a AppLovin teve EPS
+  negativo em 2022) fazia o Python devolver silenciosamente um número
+  complexo, que só quebrava mais adiante, longe da causa real, na hora
+  de formatar o número. Cobertos por 4 novos testes.
+- **CLIs com mensagens de erro limpas.** `dcf_engine.py`,
+  `target_price.py` e `sensitivity.py` agora usam um helper compartilhado
+  (`cli_utils.friendly_errors()`) que imprime `Error: <mensagem>` e sai
+  com código 1 em vez de um traceback cru para ticker/banco inexistente
+  ou parâmetros inválidos.
+- **CI no GitHub Actions** (`.github/workflows/tests.yml`) rodando a cada
+  push/PR: compila todos os módulos, roda os 22 testes de
+  `tests/test_valuation.py`, e faz um smoke test das três CLIs contra o
+  `data/valuation.db` versionado. Os bugs desta revisão só tinham sido
+  achados porque testei manualmente depois do fato — agora regressões
+  seriam pegas automaticamente.
+- **Terceiro heatmap de sensibilidade (Risk-Free Rate × Beta)**
+  implementado em `sensitivity.sensitivity_beta_risk_free()` e na aba
+  Sensibilidade da interface, seguindo o mesmo princípio das outras duas
+  tabelas (recalcula o WACC e chama `dcf_engine.run_dcf()`, então a
+  célula central sempre bate com o preço-alvo do DCF). Validado célula a
+  célula contra a Tabela 3 original (linhas 120–126 da aba `DCF`) — que,
+  como a Tabela 1, também soma 13 anos de FCF mas ancora o EBITDA
+  terminal no ano 5, dando o mesmo $313.31 no caso base apesar de
+  sensibilizar inputs diferentes.
+- **Isolamento por sessão do banco.** A barra lateral agora tem um
+  checkbox "Isolar esta sessão" — quando marcado, o upload grava numa
+  cópia `<nome>.session_<id>.db` exclusiva daquela sessão de navegador em
+  vez do arquivo compartilhado, sem mudar o comportamento padrão (uso
+  local de uma pessoa só continua carregando `data/valuation.db`
+  diretamente).
+
+## O que ainda falta
+
+Um item genuinamente fora de alcance nesta sessão, por depender de dado
+externo que não tenho:
+
+- **Testar com uma segunda empresa real.** O schema e o motor são
+  multi-empresa por design, e o isolamento entre empresas foi validado
   com um clone sintético (`tests/test_valuation.py`), mas nunca com um
-  segundo arquivo `.xlsx` de verdade. Vale carregar um peer (ex. outro
-  ad-tech) para achar premissas do parser que só aparecem com dados
-  diferentes dos da AppLovin.
-- **`get_wacc()` e `from_peg()` têm riscos de divisão por zero / base
-  negativa não tratados.** `pretax_cost_of_debt = juros / dívida total`
-  quebra para uma empresa sem dívida; `from_peg()` eleva
-  `EPS_alvo/EPS_base` a uma potência fracionária, o que quebra
-  silenciosamente (gera um número complexo, depois um erro de formatação
-  mais adiante) se o ano-base tiver EPS negativo — a AppLovin teve
-  EPS negativo em 2022, mas o ano-base usado hoje (2025A) é positivo,
-  então isso não aparece com os dados atuais. Adicionar validação
-  explícita (`ValueError` claro) antes de carregar uma segunda empresa.
-- **CLIs devolvem traceback do Python cru** para ticker/banco inexistente
-  (`dcf_engine.py`, `target_price.py`, `sensitivity.py`) — funciona, mas
-  não é uma mensagem amigável. Baixa prioridade, mas fácil de arrumar
-  (`try/except` no `main()` de cada CLI).
-- **Sem CI.** Os 17 testes em `tests/test_valuation.py` só rodam quando
-  alguém lembra de rodar `pytest` — os três bugs desta revisão só foram
-  achados porque testei manualmente depois do fato. Um workflow simples
-  do GitHub Actions (`pytest` a cada push/PR) fecharia esse buraco.
-- **Terceiro heatmap de sensibilidade (Beta × Risk-Free Rate)** existe na
-  planilha original (linhas 120–126) mas não foi replicado em
-  `sensitivity.py`/`app.py`.
-- **`data/valuation.db` acumula estado no servidor** quando `app.py` está
-  hospedado para mais de um usuário — o upload grava direto no arquivo
-  configurado em "Banco de dados", compartilhado entre todas as sessões
-  apontando pro mesmo caminho. Bom para uso pessoal/local; para expor a
-  um time, vale isolar por sessão ou trocar por um banco por usuário.
+  segundo arquivo `.xlsx` de verdade — só a AppLovin foi carregada até
+  agora. Vale carregar um peer (ex. outro ad-tech) para achar premissas
+  do parser que só aparecem com dados diferentes dos da AppLovin (ex.
+  uma empresa sem dívida, que agora falha alto e claro graças à guarda
+  acima, em vez de silenciosamente).

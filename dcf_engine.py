@@ -26,6 +26,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from cli_utils import friendly_errors
+
 FIRST_FORECAST_YEAR = 2026
 LAST_FORECAST_YEAR = 2038
 TOTAL_FORECAST_YEARS = LAST_FORECAST_YEAR - FIRST_FORECAST_YEAR + 1  # 13
@@ -62,6 +64,17 @@ def get_wacc(conn: sqlite3.Connection, company_id: int) -> dict:
     cost_of_equity = inputs["risk_free_rate"] + inputs["beta"] * inputs["equity_risk_premium"]
 
     total_debt = latest_actual["long_term_debt"]
+    if total_debt == 0:
+        raise ValueError(
+            f"Cannot compute cost of debt: FY{latest_actual['fiscal_year']} long_term_debt "
+            "is 0 (interest expense / total debt is undefined for a debt-free company). "
+            "The source Bloomberg template's own Kd formula has the same limitation."
+        )
+    if latest_actual["pretax_income"] == 0:
+        raise ValueError(
+            f"Cannot compute effective tax rate: FY{latest_actual['fiscal_year']} "
+            "pretax_income is 0."
+        )
     interest_expense = latest_actual["interest_expense"]
     pretax_cost_of_debt = interest_expense / total_debt
     effective_tax_rate = latest_actual["tax_expense"] / latest_actual["pretax_income"]
@@ -70,6 +83,8 @@ def get_wacc(conn: sqlite3.Connection, company_id: int) -> dict:
     market_cap = inputs["stock_price"] * inputs["shares_outstanding"]
     net_debt = latest_actual["net_debt"]
     enterprise_value = market_cap + net_debt
+    if enterprise_value == 0:
+        raise ValueError("Cannot compute capital structure weights: enterprise value (market cap + net debt) is 0.")
     equity_weight = market_cap / enterprise_value
     debt_weight = net_debt / enterprise_value
 
@@ -308,12 +323,13 @@ def main() -> None:
 
     conn = sqlite3.connect(args.db_path)
     try:
-        result = run_dcf(
-            conn, args.ticker, args.scenario,
-            explicit_years=args.explicit_years,
-            gordon_growth_rate=args.gordon_growth_rate,
-        )
-        print_summary(result)
+        with friendly_errors():
+            result = run_dcf(
+                conn, args.ticker, args.scenario,
+                explicit_years=args.explicit_years,
+                gordon_growth_rate=args.gordon_growth_rate,
+            )
+            print_summary(result)
     finally:
         conn.close()
 

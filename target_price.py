@@ -25,6 +25,7 @@ import argparse
 import sqlite3
 from pathlib import Path
 
+from cli_utils import friendly_errors
 from dcf_engine import get_company_id, get_wacc, project_financials, run_dcf
 
 DEFAULT_TARGET_YEAR = 2027
@@ -180,6 +181,13 @@ def from_peg(
     years = target_year - base_year
     if years <= 0:
         raise ValueError("target_year must be after base_year")
+    if eps_base <= 0 or eps_target <= 0:
+        raise ValueError(
+            f"Cannot compute EPS CAGR: EPS must be positive in both the base year "
+            f"(FY{base_year}: {eps_base}) and the target year (FY{target_year}: "
+            f"{eps_target}) — a negative base raised to a fractional power is undefined "
+            "for this formula."
+        )
 
     eps_cagr = (eps_target / eps_base) ** (1 / years) - 1
     implied_pe = target_peg * (eps_cagr * 100)
@@ -221,11 +229,12 @@ def main() -> None:
 
     conn = sqlite3.connect(args.db_path)
     try:
-        print(f"{args.ticker} — Target Price Football Field ({args.scenario} case)")
-        scenario_independent = {"P/E", "PEG"}
-        for result in football_field(conn, args.ticker, args.scenario):
-            tag = " (scenario-independent, consensus EPS)" if result["method"] in scenario_independent else ""
-            print(f"  {result['method']:<10} ${result['target_price']:,.2f}{tag}")
+        with friendly_errors():
+            print(f"{args.ticker} — Target Price Football Field ({args.scenario} case)")
+            scenario_independent = {"P/E", "PEG"}
+            for result in football_field(conn, args.ticker, args.scenario):
+                tag = " (scenario-independent, consensus EPS)" if result["method"] in scenario_independent else ""
+                print(f"  {result['method']:<10} ${result['target_price']:,.2f}{tag}")
     finally:
         conn.close()
 

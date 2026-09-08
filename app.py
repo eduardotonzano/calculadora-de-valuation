@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -23,7 +24,11 @@ import streamlit as st
 
 from data.load_from_modl import load_workbook_data, write_to_db
 from dcf_engine import get_company_id, get_wacc, run_dcf
-from sensitivity import sensitivity_growth_margin, sensitivity_wacc_exit_multiple
+from sensitivity import (
+    sensitivity_beta_risk_free,
+    sensitivity_growth_margin,
+    sensitivity_wacc_exit_multiple,
+)
 from target_price import from_ev_ebitda, from_pe, from_peg
 
 st.set_page_config(page_title="Calculadora de Valuation", layout="wide")
@@ -88,7 +93,11 @@ def get_latest_actual(conn: sqlite3.Connection, company_id: int) -> dict:
 
 
 def format_axis(value: float, fmt: str) -> str:
-    return f"{value:.2%}" if fmt == "pct" else f"{value:.4g}x"
+    if fmt == "pct":
+        return f"{value:.2%}"
+    if fmt == "num":
+        return f"{value:.2f}"
+    return f"{value:.4g}x"
 
 
 def formula(text: str) -> None:
@@ -157,8 +166,28 @@ st.markdown(CSS, unsafe_allow_html=True)
 st.sidebar.title("Calculadora de Valuation")
 
 with st.sidebar.expander("Banco de dados", expanded=False):
-    db_path = st.text_input("Caminho do .db", value=DEFAULT_DB_PATH)
+    db_path_input = st.text_input("Caminho do .db", value=DEFAULT_DB_PATH)
     st.caption("Onde o arquivo enviado abaixo é gravado/lido. O schema é multi-empresa: cada envio soma ao banco, não substitui.")
+    isolate_session = st.checkbox(
+        "Isolar esta sessão (não gravar no banco compartilhado)",
+        value=False,
+        help=(
+            "Se a interface estiver hospedada para mais de uma pessoa, marque isto "
+            "antes de enviar uma planilha: em vez de todas as sessões escreverem no "
+            "mesmo arquivo configurado acima, esta sessão passa a usar uma cópia "
+            "temporária só sua, que some quando a sessão do navegador terminar."
+        ),
+    )
+
+if "session_id" not in st.session_state:
+    st.session_state.session_id = uuid.uuid4().hex[:8]
+
+if isolate_session:
+    p = Path(db_path_input)
+    db_path = str(p.with_name(f"{p.stem}.session_{st.session_state.session_id}{p.suffix}"))
+    st.sidebar.caption(f"Sessão isolada: `{db_path}`")
+else:
+    db_path = db_path_input
 
 st.sidebar.subheader("Enviar planilha Bloomberg MODL")
 uploaded_file = st.sidebar.file_uploader(
@@ -591,6 +620,7 @@ with tab_sens:
 
     wacc_multiple = sensitivity_wacc_exit_multiple(conn, ticker, scenario, explicit_years)
     growth_margin = sensitivity_growth_margin(conn, ticker, scenario, explicit_years)
+    beta_risk_free = sensitivity_beta_risk_free(conn, ticker, scenario, explicit_years)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -602,11 +632,23 @@ with tab_sens:
         with st.expander("Ver grid em números"):
             st.dataframe(grid_dataframe(growth_margin).style.format("${:,.2f}"), use_container_width=True)
 
-    st.markdown("### O arquivo original não reconcilia essas duas tabelas com a própria célula principal")
+    col3, _unused = st.columns(2)
+    with col3:
+        st.plotly_chart(heatmap(beta_risk_free, "Risk-Free Rate × Beta"), use_container_width=True)
+        with st.expander("Ver grid em números"):
+            st.dataframe(grid_dataframe(beta_risk_free).style.format("${:,.2f}"), use_container_width=True)
+        st.caption(
+            "Recalcula o custo de equity (Rf + beta x ERP) para cada par, mantendo "
+            "peso de capital e custo de divida fixos no valor do caso base, e "
+            "alimenta o WACC resultante em dcf_engine.run_dcf() -- mesmo principio "
+            "das outras duas tabelas."
+        )
+
+    st.markdown("### O arquivo original não reconcilia essas tabelas com a própria célula principal")
     st.markdown(
         "Ao validar `sensitivity.py` célula a célula contra o arquivo Bloomberg, as "
-        "três referências de \"preço-alvo no caso base\" da própria planilha "
-        "divergem entre si:"
+        "referências de \"preço-alvo no caso base\" da própria planilha divergem "
+        "entre si:"
     )
     mismatch_df = pd.DataFrame(
         SOURCE_FILE_BASE_CASE_CELLS, columns=["Célula / fonte", "Fórmula usada pela planilha", "Preço-alvo ($)"]
@@ -616,10 +658,12 @@ with tab_sens:
         "A Tabela 2 (Cresc. × Margem) é a única internamente consistente — soma os 13 "
         "anos completos com o valor terminal alinhado ao último ano. É por isso que, "
         "com \u201cAnos de projeção explícita\u201d = 13 na barra lateral, o grid de "
-        "Crescimento × Margem acima reproduz D110 = $412.19 célula a célula. A Tabela "
-        "1 (WACC × Múltiplo) soma 13 anos de FCF mas ainda âncora o EBITDA terminal no "
-        "ano 5, descontando esse valor obsoleto 8 anos além do que deveria — nem "
-        "conservadora nem agressiva, apenas inconsistente."
+        "Crescimento × Margem acima reproduz D110 = $412.19 célula a célula. As "
+        "Tabelas 1 (WACC × Múltiplo) e 3 (Risk-Free × Beta) somam 13 anos de FCF mas "
+        "ainda âncoram o EBITDA terminal no ano 5, descontando esse valor obsoleto 8 "
+        "anos além do que deveria — por isso as duas dão o mesmo $313.31 no caso "
+        "base, apesar de sensibilizarem inputs completamente diferentes. Nem "
+        "conservador nem agressivo, apenas inconsistente."
     )
 
 # =============================================================== Metodologia ===

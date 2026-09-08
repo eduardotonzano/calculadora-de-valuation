@@ -1,14 +1,14 @@
-"""DCF sensitivity tables: WACC x Exit Multiple, and Revenue Growth Δ x EBIT
-Margin Δ.
+"""DCF sensitivity tables: WACC x Exit Multiple, Revenue Growth Δ x EBIT
+Margin Δ, and Risk-Free Rate x Beta.
 
-Both tables are built by calling dcf_engine.run_dcf() once per grid cell,
-perturbing one pair of inputs at a time. Because they reuse run_dcf()
-directly, the zero-delta cell of every grid always reconciles exactly to
-run_dcf()'s own price per share for that scenario/explicit_years.
+All three tables are built by calling dcf_engine.run_dcf() once per grid
+cell, perturbing one pair of inputs at a time. Because they reuse
+run_dcf() directly, the zero-delta cell of every grid always reconciles
+exactly to run_dcf()'s own price per share for that scenario/explicit_years.
 
 That reconciliation is the whole reason to build it this way: the source
 Bloomberg MODL file does NOT have it. Its main DCF cell (`C87`) and its
-own two sensitivity tables each use a different DCF formula:
+own three sensitivity tables each use a different DCF formula:
 
   - Main DCF (C87): sums PV of FCF for years 1-5 only, terminal value off
     year 5 EBITDA discounted at year 5's mid-year period. -> $388.54
@@ -20,12 +20,17 @@ own two sensitivity tables each use a different DCF formula:
     sums PV of FCF for all 13 years AND bases the terminal EBITDA on year
     13, discounted at year 13. At zero/zero -> $412.19 (this one matches
     dcf_engine.run_dcf(explicit_years=13) exactly).
+  - "SENSITIVITY 3: BETA vs. RISK-FREE RATE" (rows 120-126): recomputes
+    WACC from a perturbed cost of equity (same capital-structure weights
+    and cost of debt as the base case) but plugs it into the same
+    13-year-sum/year-5-terminal-EBITDA/year-13-discount formula as
+    Sensitivity 1. At base risk-free/beta -> $313.31 again.
 
-So the file's own three "base case" numbers disagree with each other by
-as much as ~24%. See README.md for the full writeup. sensitivity.py does
-not reproduce any of that: it always uses dcf_engine's single formula
+So the file's own four "base case" numbers disagree with each other by as
+much as ~24%. See README.md for the full writeup. sensitivity.py does not
+reproduce any of that: it always uses dcf_engine's single formula
 (explicit_years=5 by default, matching the validated $388.54), so every
-cell in both grids here is directly comparable to run_dcf()'s own output.
+cell in every grid here is directly comparable to run_dcf()'s own output.
 """
 
 from __future__ import annotations
@@ -34,12 +39,15 @@ import argparse
 import sqlite3
 from pathlib import Path
 
+from cli_utils import friendly_errors
 from dcf_engine import get_company_id, get_wacc, run_dcf
 
 WACC_DELTAS = (-0.04, -0.02, 0.0, 0.02, 0.04)
 EXIT_MULTIPLE_DELTAS = (-4.0, -2.0, 0.0, 2.0, 4.0)
 GROWTH_DELTAS = (-0.08, -0.04, 0.0, 0.04, 0.08)
 MARGIN_DELTAS = (-0.04, -0.02, 0.0, 0.02, 0.04)
+RISK_FREE_DELTAS = (-0.01, -0.005, 0.0, 0.005, 0.01)
+BETA_DELTAS = (-1.0, -0.5, 0.0, 0.5, 1.0)
 
 
 def sensitivity_wacc_exit_multiple(
@@ -113,9 +121,55 @@ def sensitivity_growth_margin(
     }
 
 
+def sensitivity_beta_risk_free(
+    conn: sqlite3.Connection,
+    ticker: str,
+    scenario: str = "base",
+    explicit_years: int = 5,
+    risk_free_deltas: tuple[float, ...] = RISK_FREE_DELTAS,
+    beta_deltas: tuple[float, ...] = BETA_DELTAS,
+) -> dict:
+    """Recompute WACC for each (risk-free, beta) pair — same equity/debt
+    weights and cost of debt as the base case, only cost of equity moves —
+    then feed that WACC into dcf_engine.run_dcf() via wacc_override."""
+    company_id = get_company_id(conn, ticker)
+    wacc_data = get_wacc(conn, company_id)
+    equity_risk_premium = wacc_data["equity_risk_premium"]
+    equity_weight = wacc_data["equity_weight"]
+    debt_weight = wacc_data["debt_weight"]
+    after_tax_cost_of_debt = wacc_data["after_tax_cost_of_debt"]
+
+    risk_free_axis = [wacc_data["risk_free_rate"] + d for d in risk_free_deltas]
+    beta_axis = [wacc_data["beta"] + d for d in beta_deltas]
+
+    grid = []
+    for risk_free in risk_free_axis:
+        row = []
+        for beta in beta_axis:
+            cost_of_equity = risk_free + beta * equity_risk_premium
+            wacc = equity_weight * cost_of_equity + debt_weight * after_tax_cost_of_debt
+            price = run_dcf(
+                conn, ticker, scenario, explicit_years=explicit_years, wacc_override=wacc
+            )["price_per_share"]
+            row.append(price)
+        grid.append(row)
+
+    return {
+        "row_label": "Risk-Free Rate",
+        "col_label": "Beta",
+        "row_axis": risk_free_axis,
+        "col_axis": beta_axis,
+        "row_format": "pct",
+        "col_format": "num",
+        "grid": grid,
+    }
+
+
 def _fmt_axis(value: float, fmt: str) -> str:
     if fmt == "pct":
         return f"{value:.2%}"
+    if fmt == "num":
+        return f"{value:.2f}"
     return f"{value:.4g}x"
 
 
@@ -140,10 +194,13 @@ def main() -> None:
 
     conn = sqlite3.connect(args.db_path)
     try:
-        print(f"{args.ticker} — Sensitivity ({args.scenario} case, {args.explicit_years}y explicit)\n")
-        print_grid(sensitivity_wacc_exit_multiple(conn, args.ticker, args.scenario, args.explicit_years))
-        print()
-        print_grid(sensitivity_growth_margin(conn, args.ticker, args.scenario, args.explicit_years))
+        with friendly_errors():
+            print(f"{args.ticker} — Sensitivity ({args.scenario} case, {args.explicit_years}y explicit)\n")
+            print_grid(sensitivity_wacc_exit_multiple(conn, args.ticker, args.scenario, args.explicit_years))
+            print()
+            print_grid(sensitivity_growth_margin(conn, args.ticker, args.scenario, args.explicit_years))
+            print()
+            print_grid(sensitivity_beta_risk_free(conn, args.ticker, args.scenario, args.explicit_years))
     finally:
         conn.close()
 

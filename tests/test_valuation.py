@@ -17,8 +17,12 @@ from pathlib import Path
 
 import pytest
 
-from dcf_engine import get_company_id, run_dcf
-from sensitivity import sensitivity_growth_margin, sensitivity_wacc_exit_multiple
+from dcf_engine import get_company_id, get_wacc, run_dcf
+from sensitivity import (
+    sensitivity_beta_risk_free,
+    sensitivity_growth_margin,
+    sensitivity_wacc_exit_multiple,
+)
 from target_price import from_ev_ebitda, from_pe, from_peg
 
 DB_PATH = Path(__file__).parent.parent / "data" / "valuation.db"
@@ -68,6 +72,45 @@ def multi_company_conn(tmp_path):
     connection.commit()
     yield connection
     connection.close()
+
+
+@pytest.fixture
+def clone_conn_factory(tmp_path):
+    """Factory for a temp copy of valuation.db with a cloned 'BROKEN US'
+    company whose latest actual historicals row can be tweaked (e.g. zero
+    debt), used to exercise get_wacc()'s division-by-zero guards without
+    touching real AppLovin data."""
+
+    def _make(**historicals_overrides):
+        db_copy = tmp_path / f"broken_{len(historicals_overrides)}_{'-'.join(historicals_overrides)}.db"
+        shutil.copy(DB_PATH, db_copy)
+        connection = sqlite3.connect(db_copy)
+        cur = connection.cursor()
+        cur.execute(
+            "INSERT INTO companies (ticker, name, currency, units, as_of_date) "
+            "SELECT 'BROKEN US', 'Broken Corp', currency, units, as_of_date "
+            "FROM companies WHERE ticker = ?", (TICKER,),
+        )
+        new_id = cur.lastrowid
+        old_id = get_company_id(connection, TICKER)
+        for table, cols in CLONE_COLUMNS.items():
+            cur.execute(
+                f"INSERT INTO {table} (company_id,{cols}) SELECT ?,{cols} FROM {table} WHERE company_id = ?",
+                (new_id, old_id),
+            )
+        if historicals_overrides:
+            set_clause = ", ".join(f"{col} = ?" for col in historicals_overrides)
+            cur.execute(
+                f"""UPDATE historicals SET {set_clause}
+                    WHERE company_id = ? AND period_type = 'actual'
+                    AND fiscal_year = (SELECT MAX(fiscal_year) FROM historicals
+                                       WHERE company_id = ? AND period_type = 'actual')""",
+                (*historicals_overrides.values(), new_id, new_id),
+            )
+        connection.commit()
+        return connection
+
+    return _make
 
 
 # --------------------------------------------------------- DCF baseline --
@@ -163,3 +206,45 @@ def test_multi_company_results_do_not_bleed(multi_company_conn):
     original = run_dcf(multi_company_conn, TICKER, "base")["price_per_share"]
     clone = run_dcf(multi_company_conn, "CLONE US", "base")["price_per_share"]
     assert original == pytest.approx(clone)  # CLONE US is a byte-for-byte copy
+
+
+# --------------------------------------------------- get_wacc() guards --
+
+def test_get_wacc_rejects_zero_debt(clone_conn_factory):
+    """AppLovin carries debt so this never fires today, but the schema is
+    meant to hold other companies too, including debt-free ones."""
+    conn = clone_conn_factory(long_term_debt=0)
+    with pytest.raises(ValueError, match="debt-free"):
+        get_wacc(conn, get_company_id(conn, "BROKEN US"))
+
+
+def test_get_wacc_rejects_zero_pretax_income(clone_conn_factory):
+    conn = clone_conn_factory(pretax_income=0)
+    with pytest.raises(ValueError, match="effective tax rate"):
+        get_wacc(conn, get_company_id(conn, "BROKEN US"))
+
+
+def test_get_wacc_rejects_zero_enterprise_value(clone_conn_factory):
+    # net_debt == -market_cap (317.76 * 335.94) makes enterprise value 0.
+    conn = clone_conn_factory(net_debt=-106748.2944)
+    with pytest.raises(ValueError, match="enterprise value"):
+        get_wacc(conn, get_company_id(conn, "BROKEN US"))
+
+
+# ---------------------------------------------------- from_peg() guards --
+
+def test_from_peg_rejects_negative_base_eps(conn):
+    """FY2022 EPS (-0.52) would otherwise raise a negative base to a
+    fractional power — Python silently returns a complex number instead
+    of erroring, which then breaks formatting far from the real cause."""
+    with pytest.raises(ValueError, match="must be positive"):
+        from_peg(conn, TICKER, target_year=2026, base_year=2022)
+
+
+# ------------------------------------------------- Beta x Risk-Free grid --
+
+def test_sensitivity_beta_risk_free_center_cell_matches_dcf(conn):
+    dcf_price = run_dcf(conn, TICKER, "base")["price_per_share"]
+    table = sensitivity_beta_risk_free(conn, TICKER, "base", explicit_years=5)
+    center = table["grid"][2][2]  # zero risk-free delta, zero beta delta
+    assert center == pytest.approx(dcf_price)
