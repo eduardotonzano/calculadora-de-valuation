@@ -13,7 +13,15 @@ CREATE TABLE IF NOT EXISTS companies (
     name        TEXT NOT NULL,
     currency    TEXT NOT NULL DEFAULT 'USD',
     units       TEXT NOT NULL DEFAULT 'millions',
-    as_of_date  TEXT                       -- Bloomberg "As of" date, ISO 8601
+    as_of_date  TEXT,                      -- Bloomberg "As of" date, ISO 8601
+    -- 'modl_tabs': scenario/terminal/WACC assumptions extracted from a
+    -- hand-built DCF/WACC tab in the source workbook (e.g. AppLovin).
+    -- 'derived': no such tab existed (the normal shape of a raw Bloomberg
+    -- MODL export) -- data/load_from_modl.py computed them from
+    -- historicals + supplied market data instead. app.py reads this to
+    -- avoid describing a company's own source file as having a bug it
+    -- never had.
+    data_source TEXT NOT NULL DEFAULT 'modl_tabs' CHECK (data_source IN ('modl_tabs', 'derived'))
 );
 
 -- Annual actuals (period_type='actual') and Street-consensus estimates
@@ -37,6 +45,7 @@ CREATE TABLE IF NOT EXISTS historicals (
     net_debt              REAL,             -- positive = net debt, negative = net cash
     capex                 REAL,             -- raw Bloomberg cash-flow sign (outflow is negative)
     nwc_change            REAL,             -- raw Bloomberg cash-flow sign, (use)/source of cash
+    shares_diluted        REAL,             -- diluted weighted-avg shares for that fiscal year, millions
     UNIQUE (company_id, fiscal_year)
 );
 
@@ -55,10 +64,14 @@ CREATE TABLE IF NOT EXISTS wacc_inputs (
     UNIQUE (company_id)
 );
 
--- Forward operating assumptions per scenario/year, matching the
--- Bear/Base/Bull blocks on the DCF sheet: revenue growth, EBIT margin,
--- tax rate, D&A and CapEx as % of revenue, and NWC impact as % of the
--- change in revenue.
+-- Forward operating assumptions per scenario/year: revenue growth, EBIT
+-- margin, tax rate, D&A and CapEx as % of revenue, and NWC impact as % of
+-- the change in revenue. Sourced one of two ways by data/load_from_modl.py:
+-- extracted from a hand-built Bear/Base/Bull DCF tab when the workbook has
+-- one (e.g. AppLovin), or derived formulaically from `historicals` alone
+-- (consensus-derived growth fading to a terminal rate, trailing-average
+-- margins) when it doesn't -- which is the normal shape of a raw Bloomberg
+-- MODL export. See README.md.
 CREATE TABLE IF NOT EXISTS scenario_assumptions (
     id                     INTEGER PRIMARY KEY,
     company_id             INTEGER NOT NULL REFERENCES companies(id),

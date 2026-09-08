@@ -210,14 +210,26 @@ def from_peg(
 
 
 def football_field(conn: sqlite3.Connection, ticker: str, scenario: str = "base") -> list[dict]:
-    """Line up DCF and all three multiples methods for side-by-side comparison."""
+    """Line up DCF and all three multiples methods for side-by-side comparison.
+
+    A method that can't run for this company/year (e.g. no trading_comps —
+    always true for a company whose data was derived rather than extracted
+    from a hand-built DCF tab, see data/load_from_modl.py) is skipped
+    rather than raising, so one unavailable method doesn't take down the
+    whole comparison.
+    """
     dcf_result = run_dcf(conn, ticker, scenario)
-    return [
-        {"method": "DCF", "target_price": dcf_result["price_per_share"]},
-        from_ev_ebitda(conn, ticker, scenario=scenario),
-        from_pe(conn, ticker),
-        from_peg(conn, ticker),
-    ]
+    results = [{"method": "DCF", "target_price": dcf_result["price_per_share"]}]
+    for fn, kwargs in [
+        (from_ev_ebitda, dict(scenario=scenario)),
+        (from_pe, {}),
+        (from_peg, {}),
+    ]:
+        try:
+            results.append(fn(conn, ticker, **kwargs))
+        except ValueError:
+            continue
+    return results
 
 
 def main() -> None:
@@ -232,9 +244,13 @@ def main() -> None:
         with friendly_errors():
             print(f"{args.ticker} — Target Price Football Field ({args.scenario} case)")
             scenario_independent = {"P/E", "PEG"}
-            for result in football_field(conn, args.ticker, args.scenario):
+            results = football_field(conn, args.ticker, args.scenario)
+            for result in results:
                 tag = " (scenario-independent, consensus EPS)" if result["method"] in scenario_independent else ""
                 print(f"  {result['method']:<10} ${result['target_price']:,.2f}{tag}")
+            missing = {"EV/EBITDA", "P/E", "PEG"} - {r["method"] for r in results}
+            if missing:
+                print(f"  (indisponível: {', '.join(sorted(missing))} — sem dados suficientes para esse método)")
     finally:
         conn.close()
 
