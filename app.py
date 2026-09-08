@@ -376,6 +376,7 @@ if uploaded_file is not None:
                         st.session_state["md_beta"] = fetched["beta"]
                         st.session_state["md_risk_free_pct"] = round(fetched["risk_free_rate"] * 100, 3)
                         st.session_state["md_erp_pct"] = round(fetched["equity_risk_premium"] * 100, 3)
+                        st.session_state["md_fetched_ticker"] = resolved
                         caveats = []
                         if fetched["beta_missing"]:
                             caveats.append("beta indisponível no Yahoo, mantive 1.00 — confira antes de carregar")
@@ -395,11 +396,18 @@ if uploaded_file is not None:
             ready_to_load = submitted and stock_price > 0
             if submitted and stock_price <= 0:
                 st.sidebar.error("Preço da ação precisa ser maior que zero.")
+            fetched_ticker = st.session_state.get("md_fetched_ticker")
+            source = (
+                f"Yahoo Finance (yfinance), ticker {fetched_ticker} — preço/beta ao vivo, "
+                "10Y Treasury via ^TNX, ERP fixo (Damodaran)"
+                if fetched_ticker else "Informado manualmente no upload"
+            )
             market_data = {
                 "risk_free_rate": risk_free_pct / 100,
                 "beta": beta,
                 "equity_risk_premium": erp_pct / 100,
                 "stock_price": stock_price,
+                "source": source,
             }
 
         if ready_to_load:
@@ -471,8 +479,8 @@ st.caption(
     f"cenário: {scenario} · fonte: {db_path}"
 )
 
-tab_summary, tab_wacc, tab_dcf, tab_terminal, tab_multiples, tab_sens, tab_method = st.tabs(
-    ["Sumário", "WACC", "Projeção & FCF", "Valor Terminal", "Múltiplos", "Sensibilidade", "Metodologia"]
+tab_summary, tab_wacc, tab_dcf, tab_terminal, tab_multiples, tab_sens, tab_method, tab_glossary = st.tabs(
+    ["Sumário", "WACC", "Projeção & FCF", "Valor Terminal", "Múltiplos", "Sensibilidade", "Metodologia", "Glossário"]
 )
 
 # =============================================================== Sumário ===
@@ -497,8 +505,23 @@ with tab_summary:
     )
 
     st.subheader("Football field — comparação de métodos")
+    st.caption(
+        "As barras comparam **valor presente**: o preço-alvo de cada método de "
+        "múltiplo (uma estimativa para FY{}E, daqui a {} anos) é trazido a valor "
+        "presente pelo WACC — a mesma base do preço do DCF, que já é um valor "
+        "presente por construção. O preço-alvo nominal (o número que um relatório "
+        "de research imprimiria, como o alvo de US\\$350 da Morgan Stanley para a "
+        "Vertiv em 12-18 meses) e o ano a que ele se refere aparecem na tabela abaixo."
+        .format(target_year, target_year - latest_actual["fiscal_year"])
+    )
 
-    results = [{"method": "DCF", "target_price": dcf_result["price_per_share"]}]
+    results = [{
+        "method": "DCF",
+        "target_price": dcf_result["price_per_share"],
+        "present_value_target_price": dcf_result["price_per_share"],
+        "target_year": latest_actual["fiscal_year"],
+        "years_out": 0,
+    }]
     unavailable = []
     for name, fn, kwargs in [
         ("EV/EBITDA", from_ev_ebitda, dict(scenario=scenario, target_year=target_year)),
@@ -520,13 +543,13 @@ with tab_summary:
         )
 
     ff_df = pd.DataFrame(
-        [{"Método": r["method"], "Preço-alvo": r["target_price"]} for r in results]
-    ).sort_values("Preço-alvo")
+        [{"Método": r["method"], "Valor Presente": r["present_value_target_price"]} for r in results]
+    ).sort_values("Valor Presente")
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=ff_df["Preço-alvo"], y=ff_df["Método"], orientation="h",
-        text=[f"${v:,.2f}" for v in ff_df["Preço-alvo"]], textposition="outside",
+        x=ff_df["Valor Presente"], y=ff_df["Método"], orientation="h",
+        text=[f"${v:,.2f}" for v in ff_df["Valor Presente"]], textposition="outside",
         marker_color="#4C78A8",
     ))
     fig.add_vline(
@@ -534,17 +557,35 @@ with tab_summary:
         annotation_text=f"Preço atual (${current_price:,.2f})", annotation_position="top",
     )
     fig.update_layout(
-        xaxis_title="Preço por ação ($)", yaxis_title=None, height=320,
+        xaxis_title="Preço por ação, valor presente ($)", yaxis_title=None, height=320,
         margin=dict(l=10, r=10, t=30, b=10),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    upside_df = ff_df.copy()
-    upside_df["Upside/(Downside)"] = upside_df["Preço-alvo"] / current_price - 1
+    upside_df = pd.DataFrame([
+        {
+            "Método": r["method"],
+            "Horizonte": "hoje (DCF)" if r["years_out"] == 0 else f"FY{r['target_year']}E (+{r['years_out']}a)",
+            "Preço-alvo nominal": r["target_price"],
+            "Valor Presente": r["present_value_target_price"],
+            "Upside/(Downside) (VP)": r["present_value_target_price"] / current_price - 1,
+        }
+        for r in results
+    ]).set_index("Método")
     st.table(
-        upside_df.set_index("Método").style.format({"Preço-alvo": "${:,.2f}", "Upside/(Downside)": "{:+.1%}"})
+        upside_df.style.format({
+            "Preço-alvo nominal": "${:,.2f}",
+            "Valor Presente": "${:,.2f}",
+            "Upside/(Downside) (VP)": "{:+.1%}",
+        })
     )
-    st.caption("Fórmulas e inputs completos de cada método de múltiplo: aba *Múltiplos*.")
+    st.caption(
+        "\"Preço-alvo nominal\" é o valor projetado para o ano-alvo, sem desconto — "
+        "compare-o com preços-alvo de research (ex.: o caso Vertiv/Morgan Stanley acima). "
+        "\"Valor Presente\" e o upside implícito usam esse mesmo preço descontado a WACC, "
+        "e são a base comparável usada no gráfico. Fórmulas e inputs completos de cada "
+        "método de múltiplo: aba *Múltiplos*."
+    )
 
     if company["data_source"] == "modl_tabs":
         st.markdown("#### Achados sobre o arquivo original")
@@ -576,9 +617,9 @@ with tab_wacc:
     st.markdown("### Custo de capital próprio (CAPM)")
     formula("Ke = Rf + β × ERP")
     line_items_table([
-        ("Risk-free rate (10Y Treasury)", "input", f"{wacc_data['risk_free_rate']:.2%}"),
-        ("Beta (5Y mensal)", "input", f"{wacc_data['beta']:.2f}"),
-        ("Equity Risk Premium", "input", f"{wacc_data['equity_risk_premium']:.2%}"),
+        ("Risk-free rate (10Y Treasury)", wacc_data["source"], f"{wacc_data['risk_free_rate']:.2%}"),
+        ("Beta (5Y mensal)", wacc_data["source"], f"{wacc_data['beta']:.2f}"),
+        ("Equity Risk Premium", wacc_data["source"], f"{wacc_data['equity_risk_premium']:.2%}"),
         (
             "Custo de Equity (Ke)",
             f"{wacc_data['risk_free_rate']:.2%} + {wacc_data['beta']:.2f} × {wacc_data['equity_risk_premium']:.2%}",
@@ -616,8 +657,8 @@ with tab_wacc:
         "Peso Equity = Market Cap / EV;  Peso Dívida = Dívida Líquida / EV"
     )
     line_items_table([
-        ("Preço da ação", "input", f"${wacc_data['stock_price']:,.2f}"),
-        ("Ações em circulação (diluídas)", "input", f"{wacc_data['shares_outstanding']:,.2f}M"),
+        ("Preço da ação", wacc_data["source"], f"${wacc_data['stock_price']:,.2f}"),
+        ("Ações em circulação (diluídas)", "historicals, FY{}A".format(latest_actual["fiscal_year"]), f"{wacc_data['shares_outstanding']:,.2f}M"),
         ("Market Cap", f"{wacc_data['stock_price']:,.2f} × {wacc_data['shares_outstanding']:,.2f}", f"${wacc_data['market_cap']:,.1f}M"),
         ("Dívida Líquida", f"FY{latest_actual['fiscal_year']}A", f"${wacc_data['net_debt']:,.1f}M"),
         ("Enterprise Value", f"{wacc_data['market_cap']:,.1f} + {wacc_data['net_debt']:,.1f}", f"${wacc_data['enterprise_value']:,.1f}M"),
@@ -757,9 +798,17 @@ with tab_terminal:
 
 # ============================================================== Múltiplos ===
 with tab_multiples:
-    st.markdown(f"Ano-alvo selecionado: **FY{target_year}E**. Métodos P/E e PEG usam EPS de "
-                f"consenso Bloomberg e por isso não variam por cenário bear/base/bull "
-                f"(o arquivo original não tem premissas de EPS por cenário).")
+    years_out_selected = target_year - latest_actual["fiscal_year"]
+    st.markdown(
+        f"Ano-alvo selecionado: **FY{target_year}E** (daqui a **{years_out_selected} anos**). "
+        f"Métodos P/E e PEG usam EPS de consenso Bloomberg e por isso não variam por cenário "
+        f"bear/base/bull (o arquivo original não tem premissas de EPS por cenário)."
+    )
+    st.caption(
+        "Cada método abaixo mostra o preço-alvo nominal para o ano-alvo (o número que um "
+        "relatório de research imprimiria) e, na última linha, esse mesmo preço trazido a "
+        "valor presente pelo WACC — comparável ao preço do DCF."
+    )
 
     st.markdown("### EV/EBITDA")
     ev_ebitda_result, ev_ebitda_error = safe_result(
@@ -768,7 +817,8 @@ with tab_multiples:
     formula(
         "EV = EBITDA projetado(ano-alvo) × Múltiplo EV/EBITDA\n"
         "Equity Value = EV − Dívida Líquida\n"
-        "Preço-alvo = Equity Value / Ações em circulação"
+        "Preço-alvo = Equity Value / Ações em circulação\n"
+        "Valor Presente = Preço-alvo / (1 + WACC) ^ anos até o ano-alvo"
     )
     if ev_ebitda_result:
         line_items_table([
@@ -777,7 +827,12 @@ with tab_multiples:
             ("Enterprise Value", f"{ev_ebitda_result['ebitda']:,.1f} × {ev_ebitda_result['ev_ebitda_multiple']:.1f}", f"${ev_ebitda_result['enterprise_value']:,.1f}M"),
             ("(−) Dívida Líquida", "", f"−${ev_ebitda_result['net_debt']:,.1f}M"),
             ("Equity Value", "", f"${ev_ebitda_result['equity_value']:,.1f}M"),
-            ("Preço-alvo", "Equity Value / Ações", f"${ev_ebitda_result['target_price']:,.2f}"),
+            (f"Preço-alvo (FY{target_year}E, nominal)", "Equity Value / Ações", f"${ev_ebitda_result['target_price']:,.2f}"),
+            (
+                f"Valor Presente ({ev_ebitda_result['years_out']} anos, WACC {dcf_result['wacc_used']:.2%})",
+                f"{ev_ebitda_result['target_price']:,.2f} / (1+{dcf_result['wacc_used']:.2%})^{ev_ebitda_result['years_out']}",
+                f"${ev_ebitda_result['present_value_target_price']:,.2f}",
+            ),
         ])
         source_tag("target_price.from_ev_ebitda()")
     else:
@@ -785,12 +840,20 @@ with tab_multiples:
 
     st.markdown("### P/E")
     pe_result, pe_error = safe_result(from_pe, conn, ticker, target_year=target_year)
-    formula("Preço-alvo = Múltiplo P/E × EPS diluído consenso (ano-alvo)")
+    formula(
+        "Preço-alvo = Múltiplo P/E × EPS diluído consenso (ano-alvo)\n"
+        "Valor Presente = Preço-alvo / (1 + WACC) ^ anos até o ano-alvo"
+    )
     if pe_result:
         line_items_table([
             (f"EPS diluído ajustado (FY{target_year}E)", "historicals (consenso Bloomberg)", f"${pe_result['eps']:,.2f}"),
             ("Múltiplo P/E usado", pe_result["multiple_source"], f"{pe_result['pe_multiple']:.2f}x"),
-            ("Preço-alvo", f"{pe_result['pe_multiple']:.2f} × {pe_result['eps']:,.2f}", f"${pe_result['target_price']:,.2f}"),
+            (f"Preço-alvo (FY{target_year}E, nominal)", f"{pe_result['pe_multiple']:.2f} × {pe_result['eps']:,.2f}", f"${pe_result['target_price']:,.2f}"),
+            (
+                f"Valor Presente ({pe_result['years_out']} anos, WACC {dcf_result['wacc_used']:.2%})",
+                f"{pe_result['target_price']:,.2f} / (1+{dcf_result['wacc_used']:.2%})^{pe_result['years_out']}",
+                f"${pe_result['present_value_target_price']:,.2f}",
+            ),
         ])
         source_tag("target_price.from_pe() — múltiplo default = trading_comps (P/E de mercado atual para o ano)")
     else:
@@ -805,7 +868,8 @@ with tab_multiples:
     formula(
         "CAGR do EPS = (EPS_alvo / EPS_base) ^ (1/anos) − 1\n"
         "P/E implícito = PEG-alvo × (CAGR do EPS × 100)\n"
-        "Preço-alvo = P/E implícito × EPS_alvo"
+        "Preço-alvo = P/E implícito × EPS_alvo\n"
+        "Valor Presente = Preço-alvo / (1 + WACC) ^ anos até o ano-alvo"
     )
     if peg_result:
         line_items_table([
@@ -814,7 +878,12 @@ with tab_multiples:
             ("CAGR do EPS", f"({peg_result['eps_target']:,.2f}/{peg_result['eps_base']:,.2f})^(1/{peg_result['target_year']-peg_result['base_year']}) − 1", f"{peg_result['eps_cagr']:.2%}"),
             ("PEG-alvo", "heurística 'valor justo'", f"{peg_result['target_peg']:.2f}x"),
             ("P/E implícito", f"{peg_result['target_peg']:.2f} × {peg_result['eps_cagr']*100:.2f}", f"{peg_result['implied_pe']:.2f}x"),
-            ("Preço-alvo", f"{peg_result['implied_pe']:.2f} × {peg_result['eps_target']:,.2f}", f"${peg_result['target_price']:,.2f}"),
+            (f"Preço-alvo (FY{peg_result['target_year']}E, nominal)", f"{peg_result['implied_pe']:.2f} × {peg_result['eps_target']:,.2f}", f"${peg_result['target_price']:,.2f}"),
+            (
+                f"Valor Presente ({peg_result['years_out']} anos, WACC {dcf_result['wacc_used']:.2%})",
+                f"{peg_result['target_price']:,.2f} / (1+{dcf_result['wacc_used']:.2%})^{peg_result['years_out']}",
+                f"${peg_result['present_value_target_price']:,.2f}",
+            ),
         ])
         note(
             "Em nomes de altíssimo crescimento como a AppLovin (CAGR de EPS de consenso "
@@ -1014,3 +1083,70 @@ históricos, não reproduzir uma planilha específica.
             "(`derive_scenario_assumptions()`, `load_workbook_data()`) e no "
             "`README.md`."
         )
+
+# ============================================================== Glossário ===
+with tab_glossary:
+    st.markdown(
+        "Todo termo técnico usado nas outras abas, explicado em uma frase. "
+        "Os agrupamentos seguem a ordem em que os termos aparecem no app: "
+        "WACC/CAPM primeiro, depois projeção e FCF, valor terminal, DCF, "
+        "múltiplos e, por fim, sensibilidade."
+    )
+
+    def glossary_section(title: str, terms: list[tuple[str, str]]) -> None:
+        st.markdown(f"#### {title}")
+        st.table(
+            pd.DataFrame(terms, columns=["Termo", "Definição"]).set_index("Termo")
+        )
+
+    glossary_section("WACC & CAPM", [
+        ("WACC", "Weighted Average Cost of Capital — a taxa usada para trazer fluxos de caixa futuros a valor presente, ponderando o custo de equity e o custo de dívida pelos seus pesos na estrutura de capital a valor de mercado."),
+        ("CAPM", "Capital Asset Pricing Model — modelo que estima o custo de equity (Ke) como taxa livre de risco mais beta vezes o prêmio de risco de mercado."),
+        ("Ke (custo de equity)", "Retorno mínimo exigido pelos acionistas, estimado via CAPM: Rf + β × ERP."),
+        ("Kd (custo de dívida)", "Taxa de juros média que a empresa paga sobre sua dívida, aqui líquida do benefício fiscal (Kd × (1 − alíquota efetiva))."),
+        ("Risk-free rate (Rf)", "Retorno de um ativo sem risco de crédito, aproximado pelo yield do Treasury de 10 anos dos EUA (^TNX)."),
+        ("Beta (β)", "Sensibilidade histórica do retorno da ação em relação ao mercado (5 anos, base mensal) — β > 1 significa mais volátil que o mercado."),
+        ("ERP (Equity Risk Premium)", "Prêmio de retorno exigido para investir em ações em vez do ativo livre de risco; aqui um valor fixo (referência Damodaran) quando não vem do arquivo original."),
+        ("Market cap", "Preço da ação × ações em circulação diluídas — o valor de mercado do equity."),
+        ("Dívida líquida", "Dívida bruta menos caixa e equivalentes — o que resta a pagar aos credores depois de usar o caixa disponível."),
+    ])
+
+    glossary_section("Projeção & Fluxo de Caixa", [
+        ("EBIT", "Earnings Before Interest and Taxes — lucro operacional, antes de juros e impostos."),
+        ("EBITDA", "EBIT mais depreciação e amortização (D&A) — lucro operacional antes também dos efeitos não-caixa de D&A."),
+        ("NOPAT", "Net Operating Profit After Tax — EBIT × (1 − alíquota efetiva), o lucro operacional já líquido de impostos, usado como ponto de partida do FCF."),
+        ("D&A", "Depreciação e Amortização — desgaste contábil (não-caixa) de ativos fixos e intangíveis, somado de volta ao NOPAT no cálculo do FCF."),
+        ("CapEx", "Capital Expenditures — investimento em ativos fixos (imobilizado), saída de caixa subtraída no FCF."),
+        ("NWC / Δ NWC", "Necessidade de Capital de Giro (Net Working Capital) — capital preso em contas a receber, estoque e contas a pagar; sua variação (Δ NWC) é subtraída do FCF quando aumenta."),
+        ("UFCF", "Unlevered Free Cash Flow — fluxo de caixa livre antes dos efeitos de dívida: NOPAT + D&A − CapEx − Δ NWC. É o fluxo descontado no DCF."),
+        ("Mid-year convention", "Convenção de desconto que assume o fluxo de caixa de cada ano concentrado no meio do ano (período t − 0,5) em vez do fim do ano — reduz levemente o desconto porque o caixa chega, em média, mais cedo."),
+        ("Cenário (bear/base/bull)", "Três conjuntos de premissas de crescimento e margem — pessimista, central e otimista — aplicados sobre a mesma metodologia de projeção."),
+    ])
+
+    glossary_section("Valor Terminal", [
+        ("Valor Terminal (TV)", "Valor de todos os fluxos de caixa além do período de projeção explícita, condensado em um único número no último ano projetado."),
+        ("Múltiplo de saída (exit multiple)", "Método de TV que aplica um múltiplo EV/EBITDA de mercado ao EBITDA do último ano projetado, como se a empresa fosse vendida naquele momento."),
+        ("Gordon Growth (perpetuidade)", "Método de TV que assume o FCF do último ano crescendo para sempre a uma taxa constante g, descontado por (WACC − g)."),
+        ("g (taxa de crescimento na perpetuidade)", "Taxa de crescimento perpétuo assumida (ou implícita) no valor terminal — precisa ser menor que o WACC para a fórmula de Gordon Growth fazer sentido."),
+        ("g implícito", "A taxa g que, usada no método Gordon Growth, reproduziria o mesmo valor terminal do método de múltiplo de saída — um cross-check de consistência entre os dois métodos."),
+    ])
+
+    glossary_section("Preço-Alvo & Múltiplos", [
+        ("EV (Enterprise Value)", "Valor da operação como um todo, antes de separar entre credores e acionistas: soma do valor presente dos FCFs mais o valor terminal (no DCF), ou EBITDA × múltiplo (nos métodos de múltiplo)."),
+        ("Equity Value", "EV menos dívida líquida — o valor que sobra para os acionistas."),
+        ("Preço-alvo (target price)", "Equity Value dividido pelas ações em circulação diluídas — o preço por ação implícito por um método específico."),
+        ("P/E (Price/Earnings)", "Múltiplo de preço sobre lucro por ação (EPS) — aqui usado com EPS de consenso de mercado."),
+        ("PEG", "P/E dividido pela taxa de crescimento do EPS (em pontos percentuais) — usado para checar se um P/E é 'caro' ou 'barato' relativo ao crescimento esperado; PEG = 1,0x é a heurística de 'valor justo'."),
+        ("EPS diluído ajustado", "Lucro por ação diluído (considerando conversão de opções/ações restritas), ajustado por itens não-recorrentes — a métrica de consenso Bloomberg usada nos métodos P/E e PEG."),
+        ("Trading comps", "Múltiplos de mercado implícitos hoje (preço atual da ação sobre métricas futuras), extraídos do bloco 'TRADING MULTIPLES' do arquivo original quando disponível."),
+        ("Ano-alvo (target year)", "O ano futuro para o qual um método de múltiplo projeta um preço — o preço-alvo nominal é o valor esperado *nesse* ano, sem desconto."),
+        ("Valor Presente (do preço-alvo)", "O preço-alvo nominal trazido para hoje via desconto ao WACC pelo número de anos até o ano-alvo — a base comparável ao preço do DCF, que já é um valor presente."),
+        ("Upside / (Downside)", "Variação percentual entre um preço-alvo (ou seu valor presente) e o preço atual da ação."),
+        ("Football field", "Gráfico que compara os preços-alvo de vários métodos lado a lado como barras horizontais, para visualizar a dispersão de estimativas."),
+    ])
+
+    glossary_section("Sensibilidade", [
+        ("Grid de sensibilidade", "Tabela que recalcula o preço-alvo do DCF variando duas premissas ao mesmo tempo (ex.: WACC × múltiplo de saída), mostrando como o resultado reage a cada combinação."),
+        ("Anos de projeção explícita", "Quantos anos de fluxo de caixa são somados diretamente (em vez de capturados no valor terminal) — o arquivo original usa 5 apesar de projetar 13."),
+        ("Data source (modl_tabs vs. derivado)", "Indica se as premissas de WACC/cenário/múltiplo terminal vieram prontas das abas DCF/WACC do arquivo original (`modl_tabs`) ou foram calculadas por este projeto a partir de históricos e inputs de mercado, quando essas abas não existem."),
+    ])

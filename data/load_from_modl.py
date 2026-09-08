@@ -220,6 +220,7 @@ def load_wacc_inputs(wacc_ws) -> dict:
         "equity_risk_premium": wacc_ws["B7"].value,
         "stock_price": wacc_ws["B18"].value,
         "shares_outstanding": wacc_ws["B19"].value,
+        "source": "Aba WACC do arquivo original (células B5, B6, B7, B18)",
     }
 
 
@@ -588,6 +589,7 @@ def load_workbook_data(xlsx_path: Path, market_data: dict | None = None) -> dict
             "equity_risk_premium": market_data["equity_risk_premium"],
             "stock_price": market_data["stock_price"],
             "shares_outstanding": latest_actual["shares_diluted"],
+            "source": market_data.get("source") or "Informado manualmente no upload",
         },
         "scenarios": scenarios,
         "terminal_multiples": terminal_multiples,
@@ -617,6 +619,7 @@ def migrate_schema(conn: sqlite3.Connection, schema_path: Path) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     _ensure_column(conn, "historicals", "shares_diluted", "REAL")
     _ensure_column(conn, "companies", "data_source", "TEXT NOT NULL DEFAULT 'modl_tabs'")
+    _ensure_column(conn, "wacc_inputs", "source", "TEXT")
 
 
 def write_to_db(db_path: Path, schema_path: Path, data: dict) -> None:
@@ -661,9 +664,9 @@ def write_to_db(db_path: Path, schema_path: Path, data: dict) -> None:
 
         conn.execute(
             """INSERT INTO wacc_inputs
-               (company_id, risk_free_rate, beta, equity_risk_premium, stock_price, shares_outstanding)
-               VALUES (:company_id, :risk_free_rate, :beta, :equity_risk_premium, :stock_price, :shares_outstanding)""",
-            {**data["wacc_inputs"], "company_id": company_id},
+               (company_id, risk_free_rate, beta, equity_risk_premium, stock_price, shares_outstanding, source)
+               VALUES (:company_id, :risk_free_rate, :beta, :equity_risk_premium, :stock_price, :shares_outstanding, :source)""",
+            {**data["wacc_inputs"], "company_id": company_id, "source": data["wacc_inputs"].get("source")},
         )
 
         for scenario, assumptions in data["scenarios"].items():

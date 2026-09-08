@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS wacc_inputs (
     equity_risk_premium   REAL NOT NULL,
     stock_price           REAL NOT NULL,    -- current price used for market cap
     shares_outstanding    REAL NOT NULL,    -- diluted shares, millions
+    -- Where risk_free_rate/beta/equity_risk_premium/stock_price actually
+    -- came from -- shown in app.py's WACC tab instead of the bare word
+    -- "input", so a reader can trace every number back to a source
+    -- instead of just seeing that it wasn't computed.
+    source                TEXT,
     UNIQUE (company_id)
 );
 

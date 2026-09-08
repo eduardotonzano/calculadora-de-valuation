@@ -94,6 +94,7 @@ def get_wacc(conn: sqlite3.Connection, company_id: int) -> dict:
         "risk_free_rate": inputs["risk_free_rate"],
         "beta": inputs["beta"],
         "equity_risk_premium": inputs["equity_risk_premium"],
+        "source": inputs.get("source") or "Fonte não registrada",
         "cost_of_equity": cost_of_equity,
         "total_debt": total_debt,
         "interest_expense": interest_expense,
