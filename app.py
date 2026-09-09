@@ -204,14 +204,40 @@ def fetch_market_data(ticker: str) -> tuple[dict | None, str | None]:
     """Live stock price + beta for `ticker` via Yahoo Finance, plus the 10Y
     Treasury yield and a documented static ERP default. Never fabricates:
     a field Yahoo doesn't have (e.g. beta for some tickers) is reported
-    back as missing rather than guessed, so the caller can say so."""
+    back as missing rather than guessed, so the caller can say so.
+
+    Yahoo's `.info` endpoint (the only source for beta) is known to
+    intermittently come back empty or missing price fields -- a crumb/
+    cookie or rate-limit issue on Yahoo's side, not a bad ticker -- so a
+    missing price there falls back to `.fast_info` and then raw price
+    history before giving up. Beta has no such fallback (it isn't
+    exposed anywhere else), so a `.info` failure just means no beta."""
+    t = yf.Ticker(ticker)
     try:
-        info = yf.Ticker(ticker).info
-    except Exception as exc:  # noqa: BLE001
-        return None, f"não consegui consultar {ticker} no Yahoo Finance ({exc})"
+        info = t.info or {}
+    except Exception:  # noqa: BLE001 — degrades to the fallbacks below
+        info = {}
     price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
     if price is None:
-        return None, f"ticker {ticker!r} não encontrado ou sem preço disponível"
+        try:
+            fast = t.fast_info
+            price = fast.get("last_price") or fast.get("regular_market_previous_close") or fast.get("previous_close")
+        except Exception:  # noqa: BLE001
+            price = None
+    if price is None:
+        try:
+            hist = t.history(period="5d")
+            closes = hist["Close"].dropna()
+            if not closes.empty:
+                price = float(closes.iloc[-1])
+        except Exception:  # noqa: BLE001
+            price = None
+    if price is None:
+        return None, (
+            f"ticker {ticker!r} não encontrado ou sem preço disponível no momento "
+            "(o Yahoo Finance às vezes limita requisições — tente de novo em alguns "
+            "minutos, ou preencha os campos manualmente abaixo)"
+        )
     beta = info.get("beta")
     risk_free = _fetch_risk_free_rate()
     return {
@@ -416,12 +442,24 @@ if uploaded_file is not None:
                 Path(db_path).parent.mkdir(parents=True, exist_ok=True)
                 write_to_db(Path(db_path), SCHEMA_PATH, data)
             except Exception as exc:  # noqa: BLE001 — surface any parse/load failure to the user
+                # Shown both here (sidebar) and, via the flash below, on the main
+                # page after rerun -- a sidebar-only error is easy to miss if the
+                # user has scrolled down past the upload form.
+                st.session_state["upload_flash"] = ("error", f"Falha ao carregar o arquivo: {exc}")
                 st.sidebar.error(f"Falha ao carregar o arquivo: {exc}")
             else:
                 st.session_state.last_upload_signature = file_signature
                 st.session_state.last_uploaded_ticker = data["ticker"]
                 get_connection.clear()
-                st.sidebar.success(f"{data['ticker']} ({data['name']}) carregado em `{db_path}`.")
+                confirm = f"{data['ticker']} ({data['name']}) carregado em `{db_path}`."
+                if market_data:
+                    confirm += (
+                        f" Dados de mercado usados: preço ${market_data['stock_price']:,.2f}, "
+                        f"beta {market_data['beta']:.2f}, risk-free {market_data['risk_free_rate']:.2%}, "
+                        f"ERP {market_data['equity_risk_premium']:.2%}."
+                    )
+                st.session_state["upload_flash"] = ("success", confirm)
+                st.sidebar.success(confirm)
                 st.rerun()
 
 st.sidebar.divider()
@@ -473,6 +511,10 @@ wacc_data = get_wacc(conn, company_id)
 latest_actual = get_latest_actual(conn, company_id)
 current_price = wacc_data["stock_price"]
 dcf_result = run_dcf(conn, ticker, scenario, explicit_years=explicit_years)
+
+if "upload_flash" in st.session_state:
+    flash_kind, flash_text = st.session_state.pop("upload_flash")
+    (st.error if flash_kind == "error" else st.success)(flash_text)
 
 as_of = company["as_of_date"] or "sem data-base (planilha não traz esse carimbo fora das abas DCF/WACC)"
 st.title(f"{company['name']} ({company['ticker']})")
