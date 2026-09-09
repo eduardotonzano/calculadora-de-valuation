@@ -542,8 +542,14 @@ with tab_summary:
             )
         )
 
+    def pv_price(r: dict) -> float:
+        # Falls back to the nominal target price if present_value_target_price
+        # is ever missing (e.g. a result computed by an older code path) —
+        # a stale key should degrade the comparison, not crash the page.
+        return r.get("present_value_target_price", r["target_price"])
+
     ff_df = pd.DataFrame(
-        [{"Método": r["method"], "Valor Presente": r["present_value_target_price"]} for r in results]
+        [{"Método": r["method"], "Valor Presente": pv_price(r)} for r in results]
     ).sort_values("Valor Presente")
 
     fig = go.Figure()
@@ -565,10 +571,13 @@ with tab_summary:
     upside_df = pd.DataFrame([
         {
             "Método": r["method"],
-            "Horizonte": "hoje (DCF)" if r["years_out"] == 0 else f"FY{r['target_year']}E (+{r['years_out']}a)",
+            "Horizonte": (
+                "hoje (DCF)" if r.get("years_out", 0) == 0
+                else f"FY{r['target_year']}E (+{r['years_out']}a)"
+            ),
             "Preço-alvo nominal": r["target_price"],
-            "Valor Presente": r["present_value_target_price"],
-            "Upside/(Downside) (VP)": r["present_value_target_price"] / current_price - 1,
+            "Valor Presente": pv_price(r),
+            "Upside/(Downside) (VP)": pv_price(r) / current_price - 1,
         }
         for r in results
     ]).set_index("Método")
