@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS wacc_inputs (
     -- "input", so a reader can trace every number back to a source
     -- instead of just seeing that it wasn't computed.
     source                TEXT,
+    -- Additive country/sovereign risk premium on top of a base ERP built
+    -- for a mature market (e.g. US). 0 by default -- correct for a US
+    -- stock, where risk_free_rate is already the Treasury yield. Needed
+    -- if this project is ever pointed at a non-US equity (e.g. B3): the
+    -- standard adjustment is Rf(local) + beta*ERP(global) +
+    -- country_risk_premium, NOT just swapping in a local risk-free rate,
+    -- since that alone double-counts some of the country risk and misses
+    -- the rest. See dcf_engine.get_wacc().
+    country_risk_premium  REAL NOT NULL DEFAULT 0.0,
     UNIQUE (company_id)
 );
 
@@ -114,4 +123,30 @@ CREATE TABLE IF NOT EXISTS trading_comps (
     fiscal_year   INTEGER NOT NULL, -- the forward year the metric is measured against
     value         REAL NOT NULL,
     UNIQUE (company_id, metric, fiscal_year)
+);
+
+-- Free-text qualitative layer. The DCF/multiples engines are entirely
+-- quantitative; a real buy-side thesis always sits a narrative case and
+-- known risks next to the number. One row per company, editable by the
+-- analyst in app.py -- nothing here is computed.
+CREATE TABLE IF NOT EXISTS investment_thesis (
+    id              INTEGER PRIMARY KEY,
+    company_id      INTEGER NOT NULL REFERENCES companies(id),
+    bull_case       TEXT,     -- narrative case for the bull scenario
+    bear_case       TEXT,     -- narrative case for the bear scenario
+    key_risks       TEXT,     -- risks not captured by the DCF itself
+                              -- (customer concentration, litigation, regulation, ...)
+    last_updated    TEXT,     -- ISO 8601, set by app.py on save
+    UNIQUE (company_id)
+);
+
+-- Upcoming events that could move the stock or invalidate the thesis
+-- (earnings date, guidance update, regulatory decision, ...). Purely
+-- informational -- nothing in dcf_engine.py/target_price.py reads this.
+CREATE TABLE IF NOT EXISTS catalysts (
+    id              INTEGER PRIMARY KEY,
+    company_id      INTEGER NOT NULL REFERENCES companies(id),
+    event_date      TEXT NOT NULL,  -- ISO 8601, e.g. '2026-11-05'
+    description     TEXT NOT NULL,
+    UNIQUE (company_id, event_date, description)
 );

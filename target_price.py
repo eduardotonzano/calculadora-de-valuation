@@ -251,6 +251,43 @@ def from_peg(
     }
 
 
+def expected_value_price(
+    conn: sqlite3.Connection,
+    ticker: str,
+    weights: dict[str, float] | None = None,
+) -> dict:
+    """DCF price target weighted across bear/base/bull, using
+    analyst-supplied probabilities -- not something the model infers.
+
+    `weights` defaults to {'bear': 0.25, 'base': 0.5, 'bull': 0.25} (a
+    common textbook default), must cover exactly the three scenarios,
+    and must sum to 1.0 (within floating-point tolerance). The result
+    reports both the per-scenario prices and the weights used, so the
+    probability judgment behind the number is always visible next to it
+    -- an expected value with no visible weights is unreviewable.
+    """
+    if weights is None:
+        weights = {"bear": 0.25, "base": 0.5, "bull": 0.25}
+    if set(weights) != {"bear", "base", "bull"}:
+        raise ValueError(f"weights must cover exactly bear/base/bull, got {sorted(weights)}")
+    total = sum(weights.values())
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(f"weights must sum to 1.0, got {total}")
+
+    scenario_prices = {}
+    for scenario in ("bear", "base", "bull"):
+        scenario_prices[scenario] = run_dcf(conn, ticker, scenario)["price_per_share"]
+
+    weighted_price = sum(scenario_prices[s] * weights[s] for s in ("bear", "base", "bull"))
+
+    return {
+        "ticker": ticker,
+        "weights": dict(weights),
+        "scenario_prices": scenario_prices,
+        "expected_value_price": weighted_price,
+    }
+
+
 def football_field(conn: sqlite3.Connection, ticker: str, scenario: str = "base") -> list[dict]:
     """Line up DCF and all three multiples methods for side-by-side comparison.
 

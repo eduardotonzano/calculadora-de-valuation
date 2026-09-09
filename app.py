@@ -25,14 +25,17 @@ import requests
 import streamlit as st
 import yfinance as yf
 
+from comps import compare_to_peers, fetch_peer_multiples
 from data.load_from_modl import load_workbook_data, migrate_schema, write_to_db
 from dcf_engine import get_company_id, get_wacc, run_dcf
+from health import compute_health_metrics, overall_flag
 from sensitivity import (
     sensitivity_beta_risk_free,
     sensitivity_growth_margin,
     sensitivity_wacc_exit_multiple,
 )
-from target_price import from_ev_ebitda, from_pe, from_peg
+from target_price import expected_value_price, from_ev_ebitda, from_pe, from_peg
+from thesis import add_catalyst, get_thesis, list_catalysts, remove_catalyst, save_thesis
 
 st.set_page_config(page_title="Calculadora de Valuation", layout="wide")
 
@@ -558,8 +561,8 @@ st.caption(
     f"cenário: {scenario} · fonte: {db_path}"
 )
 
-tab_summary, tab_wacc, tab_dcf, tab_terminal, tab_multiples, tab_sens, tab_method, tab_glossary = st.tabs(
-    ["Sumário", "WACC", "Projeção & FCF", "Valor Terminal", "Múltiplos", "Sensibilidade", "Metodologia", "Glossário"]
+tab_summary, tab_wacc, tab_dcf, tab_terminal, tab_multiples, tab_thesis, tab_sens, tab_method, tab_glossary = st.tabs(
+    ["Sumário", "WACC", "Projeção & FCF", "Valor Terminal", "Múltiplos", "Tese", "Sensibilidade", "Metodologia", "Glossário"]
 )
 
 # =============================================================== Sumário ===
@@ -702,6 +705,57 @@ with tab_summary:
         "e são a base comparável usada no gráfico. Fórmulas e inputs completos de cada "
         "método de múltiplo: aba *Múltiplos*."
     )
+
+    st.subheader("Saúde financeira")
+    st.caption(
+        "Um preço-alvo não diz nada sobre se o balanço aguenta a espera até lá. "
+        "Alavancagem e cobertura de juros vêm do último ano reportado (ver aba Glossário)."
+    )
+    health_metrics = compute_health_metrics(conn, ticker)
+    hcol1, hcol2, hcol3 = st.columns(3)
+    hcol1.metric(
+        "Dívida líquida / EBITDA",
+        f"{health_metrics['net_debt_ebitda']:.2f}x" if health_metrics["net_debt_ebitda"] is not None else "indisponível",
+        health_metrics["leverage_flag"],
+    )
+    hcol2.metric(
+        "Cobertura de juros (EBIT/juros)",
+        f"{health_metrics['interest_coverage']:.2f}x" if health_metrics["interest_coverage"] is not None else "indisponível",
+        health_metrics["coverage_flag"],
+    )
+    hcol3.metric("Sinal geral", overall_flag(health_metrics))
+    if health_metrics["coverage_note"]:
+        st.caption(f"Nota: {health_metrics['coverage_note']}")
+
+    st.subheader("Preço-alvo esperado (ponderado por probabilidade)")
+    st.caption(
+        "O preço-alvo do DCF acima é o do cenário selecionado na barra lateral. Aqui, os "
+        "três cenários (bear/base/bull) são combinados num único número usando as "
+        "probabilidades que você atribui a cada um — a ponderação é sua, não um palpite "
+        "do modelo, e fica sempre visível ao lado do resultado."
+    )
+    wcol1, wcol2, wcol3 = st.columns(3)
+    w_bear = wcol1.number_input("Probabilidade — bear (%)", min_value=0.0, max_value=100.0, value=25.0, step=5.0, key="ev_w_bear")
+    w_base = wcol2.number_input("Probabilidade — base (%)", min_value=0.0, max_value=100.0, value=50.0, step=5.0, key="ev_w_base")
+    w_bull = wcol3.number_input("Probabilidade — bull (%)", min_value=0.0, max_value=100.0, value=25.0, step=5.0, key="ev_w_bull")
+    w_total = w_bear + w_base + w_bull
+    if abs(w_total - 100.0) > 0.01:
+        st.warning(f"As probabilidades somam {w_total:.0f}%, precisam somar 100%.")
+    else:
+        ev_result = expected_value_price(
+            conn, ticker, weights={"bear": w_bear / 100, "base": w_base / 100, "bull": w_bull / 100}
+        )
+        st.metric(
+            "Preço-alvo esperado (DCF, ponderado)",
+            f"${ev_result['expected_value_price']:,.2f}",
+            f"{ev_result['expected_value_price'] / current_price - 1:+.1%}",
+        )
+        formula(
+            "Preço-alvo esperado = "
+            f"{w_bear:.0f}% × ${ev_result['scenario_prices']['bear']:,.2f} (bear) + "
+            f"{w_base:.0f}% × ${ev_result['scenario_prices']['base']:,.2f} (base) + "
+            f"{w_bull:.0f}% × ${ev_result['scenario_prices']['bull']:,.2f} (bull)"
+        )
 
     if company["data_source"] == "modl_tabs":
         st.markdown("#### Achados sobre o arquivo original")
@@ -1012,6 +1066,128 @@ with tab_multiples:
     else:
         st.warning(f"PEG indisponível para FY{target_year}E: {peg_error}")
 
+    st.markdown("### Comps de mercado (peers)")
+    st.caption(
+        "Não existe uma API gratuita e confiável para descobrir sozinho quem são os peers "
+        "de uma empresa — isso é um julgamento do analista, o mesmo processo usado para "
+        "montar à mão uma tabela de comps no sell-side. Digite os tickers dos peers; a "
+        "busca dos múltiplos atuais de cada um (Yahoo Finance) é automática."
+    )
+    peer_tickers_input = st.text_input(
+        "Tickers dos peers, separados por vírgula (ex.: GOOGL, MSFT, META)", key="comps_peer_tickers"
+    )
+    if st.button("Buscar múltiplos dos peers"):
+        tickers_list = [t.strip().upper() for t in peer_tickers_input.split(",") if t.strip()]
+        if not tickers_list:
+            st.warning("Digite ao menos um ticker de peer.")
+        else:
+            st.session_state[f"comps_peer_data_{ticker}"] = fetch_peer_multiples(tickers_list)
+
+    peer_data = st.session_state.get(f"comps_peer_data_{ticker}")
+    if peer_data:
+        peer_rows = [
+            {
+                "Ticker": p["ticker"],
+                "Nome": p.get("name", "—") if not p.get("error") else "—",
+                "EV/EBITDA": f"{p['ev_ebitda']:.1f}x" if p.get("ev_ebitda") is not None else "—",
+                "P/E (LTM)": f"{p['pe_trailing']:.1f}x" if p.get("pe_trailing") is not None else "—",
+                "P/E (fwd)": f"{p['pe_forward']:.1f}x" if p.get("pe_forward") is not None else "—",
+                "PEG": f"{p['peg']:.2f}x" if p.get("peg") is not None else "—",
+                "Erro": p.get("error") or "",
+            }
+            for p in peer_data
+        ]
+        st.table(pd.DataFrame(peer_rows).set_index("Ticker"))
+
+        company_ebitda_ltm = latest_actual["ebit"] + latest_actual["da"]
+        company_ev_ebitda = wacc_data["enterprise_value"] / company_ebitda_ltm if company_ebitda_ltm else None
+        company_eps_ltm = latest_actual.get("eps_diluted_adjusted")
+        company_pe = current_price / company_eps_ltm if company_eps_ltm else None
+        comparison = compare_to_peers(company_ev_ebitda, company_pe, peer_data)
+        medians = comparison["peer_medians"]
+        st.caption(
+            f"Mediana dos peers ({medians['n_peers_with_data']}/{medians['n_peers_requested']} "
+            "com dado disponível):"
+        )
+        line_items_table([
+            (
+                "EV/EBITDA (empresa vs. mediana dos peers)",
+                f"EV/EBITDA_LTM = {wacc_data['enterprise_value']:,.0f} / {company_ebitda_ltm:,.0f}",
+                f"{company_ev_ebitda:.1f}x vs. {medians['ev_ebitda']:.1f}x" if company_ev_ebitda and medians["ev_ebitda"] else "indisponível",
+            ),
+            (
+                "Prêmio/desconto EV/EBITDA vs. peers",
+                "Empresa / Mediana dos peers − 1",
+                f"{comparison['ev_ebitda_premium_to_peers']:+.1%}" if comparison["ev_ebitda_premium_to_peers"] is not None else "indisponível",
+            ),
+            (
+                "P/E LTM (empresa vs. mediana dos peers)",
+                f"Preço atual / EPS FY{latest_actual['fiscal_year']}A" if company_pe else "EPS FY atual indisponível",
+                f"{company_pe:.1f}x vs. {medians['pe_trailing']:.1f}x" if company_pe and medians["pe_trailing"] else "indisponível",
+            ),
+            (
+                "Prêmio/desconto P/E vs. peers",
+                "Empresa / Mediana dos peers − 1",
+                f"{comparison['pe_premium_to_peers']:+.1%}" if comparison["pe_premium_to_peers"] is not None else "indisponível",
+            ),
+        ])
+        source_tag("comps.fetch_peer_multiples(), comps.compare_to_peers()")
+
+# ==================================================================== Tese ===
+with tab_thesis:
+    st.markdown(
+        "Tudo nas outras abas é calculado a partir de dados. Esta aba é o oposto: "
+        "espaço livre para o caso bull/bear em texto corrido e os riscos que o DCF não "
+        "captura (concentração de clientes, litígio, regulação, ...) — nada aqui é "
+        "computado, é só guardado e mostrado de volta."
+    )
+    thesis_data = get_thesis(conn, ticker)
+    with st.form("thesis_form"):
+        bull_case = st.text_area("Caso bull", value=thesis_data["bull_case"] or "", height=120)
+        bear_case = st.text_area("Caso bear", value=thesis_data["bear_case"] or "", height=120)
+        key_risks = st.text_area("Principais riscos", value=thesis_data["key_risks"] or "", height=120)
+        thesis_submitted = st.form_submit_button("Salvar tese")
+    if thesis_submitted:
+        save_thesis(conn, ticker, bull_case=bull_case, bear_case=bear_case, key_risks=key_risks)
+        st.success("Tese salva.")
+        st.rerun()
+    if thesis_data["last_updated"]:
+        st.caption(f"Última atualização: {thesis_data['last_updated']}")
+
+    st.subheader("Calendário de catalisadores")
+    st.caption(
+        "Eventos futuros que podem mover a ação ou invalidar a tese (data de resultados, "
+        "atualização de guidance, decisão regulatória, ...). Puramente informativo — "
+        "nada no DCF ou nos múltiplos lê essa lista."
+    )
+    with st.form("catalyst_form", clear_on_submit=True):
+        ccol1, ccol2 = st.columns([1, 2])
+        catalyst_date = ccol1.date_input("Data")
+        catalyst_desc = ccol2.text_input("Descrição (ex.: Resultados 3T26)")
+        catalyst_submitted = st.form_submit_button("Adicionar catalisador")
+    if catalyst_submitted:
+        if catalyst_desc.strip():
+            add_catalyst(conn, ticker, catalyst_date.isoformat(), catalyst_desc.strip())
+            st.rerun()
+        else:
+            st.warning("Descreva o catalisador antes de adicionar.")
+
+    catalysts = list_catalysts(conn, ticker)
+    if catalysts:
+        st.table(
+            pd.DataFrame(catalysts).rename(columns={"event_date": "Data", "description": "Descrição"}).set_index("Data")
+        )
+        to_remove = st.selectbox(
+            "Remover catalisador",
+            ["—"] + [f"{c['event_date']} — {c['description']}" for c in catalysts],
+        )
+        if to_remove != "—" and st.button("Remover selecionado"):
+            event_date, description = to_remove.split(" — ", 1)
+            remove_catalyst(conn, ticker, event_date, description)
+            st.rerun()
+    else:
+        st.caption("Nenhum catalisador cadastrado ainda.")
+
 # ============================================================= Sensibilidade ===
 with tab_sens:
     st.markdown(
@@ -1260,10 +1436,20 @@ with tab_glossary:
         ("Upside / (Downside)", "Variação percentual entre um preço-alvo (ou seu valor presente) e o preço atual da ação."),
         ("Preço-alvo (12–18 meses)", "O preço-alvo do DCF (um valor presente 'de hoje') projetado para frente pela própria taxa de desconto (WACC), no formato de horizonte que relatórios de research realmente usam (ex.: o alvo de 12-18 meses da Morgan Stanley para a Vertiv) — não é uma nova projeção de fluxo de caixa, é o mesmo valor justo em uma data futura."),
         ("Football field", "Gráfico que compara os preços-alvo de vários métodos lado a lado como barras horizontais, para visualizar a dispersão de estimativas."),
+        ("Preço-alvo esperado (ponderado)", "Combinação dos preços-alvo bear/base/bull do DCF em um único número, usando probabilidades atribuídas pelo analista (não pelo modelo) para cada cenário — a ponderação fica sempre visível ao lado do resultado."),
+        ("Comps de mercado (peers)", "Múltiplos atuais (EV/EBITDA, P/E, PEG) de empresas comparáveis escolhidas pelo analista, buscados no Yahoo Finance, usados para checar se a empresa negocia com prêmio ou desconto em relação ao setor."),
+        ("Country risk premium", "Prêmio adicional de risco-país somado ao custo de equity (Ke) para uma ação fora de um mercado maduro (ex.: B3) — 0% por padrão para uma ação americana, onde o risk-free rate já é o próprio Treasury."),
     ])
 
     glossary_section("Sensibilidade", [
         ("Grid de sensibilidade", "Tabela que recalcula o preço-alvo do DCF variando duas premissas ao mesmo tempo (ex.: WACC × múltiplo de saída), mostrando como o resultado reage a cada combinação."),
         ("Anos de projeção explícita", "Quantos anos de fluxo de caixa são somados diretamente (em vez de capturados no valor terminal) — o arquivo original usa 5 apesar de projetar 13."),
         ("Data source (modl_tabs vs. derivado)", "Indica se as premissas de WACC/cenário/múltiplo terminal vieram prontas das abas DCF/WACC do arquivo original (`modl_tabs`) ou foram calculadas por este projeto a partir de históricos e inputs de mercado, quando essas abas não existem."),
+    ])
+
+    glossary_section("Saúde Financeira & Tese", [
+        ("Dívida líquida / EBITDA (leverage)", "Múltiplo de alavancagem: quantos anos de EBITDA seriam necessários para pagar a dívida líquida. Abaixo de ~3x é considerado saudável, acima de ~5x é considerado alavancado (regras de bolso comuns no sell-side, não um modelo de rating)."),
+        ("Cobertura de juros (interest coverage)", "EBIT dividido pela despesa de juros — quantas vezes o lucro operacional cobre o custo da dívida. Acima de ~6x é considerado saudável, abaixo de ~2x é considerado fraco."),
+        ("Tese de investimento", "Espaço de texto livre para o caso bull/bear e os riscos que o DCF não captura (concentração de clientes, litígio, regulação, ...) — qualitativo, não computado."),
+        ("Catalisador", "Evento futuro (data de resultados, decisão regulatória, etc.) que pode mover a ação ou invalidar a tese — puramente informativo, não entra em nenhum cálculo."),
     ])
