@@ -653,3 +653,24 @@ sensibilidade e a distinção `modl_tabs` vs. `derived`. Agrupado na mesma
 ordem em que os conceitos aparecem no app (WACC → projeção/FCF → valor
 terminal → preço-alvo/múltiplos → sensibilidade), para servir de
 referência rápida sem precisar sair do app.
+
+## Anos de projeção explícita: 1/2/5/10 em vez de 5/13, e preço-alvo de 12–18 meses
+
+O controle "Anos de projeção explícita (DCF)" na barra lateral tinha só
+duas opções, 5 e 13, escolhidas para reproduzir as duas leituras que o
+próprio arquivo Bloomberg faz da sua avaliação principal (ver "Descoberta
+importante" acima). Isso deixava sem opção qualquer horizonte
+intermediário. O controle agora oferece **1, 2, 5 e 10** anos (5 continua
+sendo o padrão, o que reproduz a avaliação original de $388.54 sem
+alteração) — `dcf_engine.run_dcf()` já aceitava qualquer valor entre 1 e
+13, então a mudança foi só na UI.
+
+A aba Sumário também ganhou dois cartões novos: **Preço-alvo (12 meses)**
+e **Preço-alvo (18 meses)**. O preço-alvo do DCF é um valor presente "de
+hoje" — para expressar um alvo no formato de horizonte que relatórios de
+research realmente usam (ex.: o alvo de 12-18 meses da Morgan Stanley
+para a Vertiv), ele é projetado para frente pela própria taxa de desconto
+(WACC): `preço-alvo(n meses) = preço-alvo (DCF) × (1 + WACC) ^ (n/12)`.
+Não é uma nova projeção de fluxo de caixa — é o mesmo valor justo do DCF,
+só que na data futura em vez de hoje (a lógica-padrão usada por analistas
+para converter um valor justo de longo prazo em um alvo de curto prazo).
