@@ -674,3 +674,30 @@ para a Vertiv), ele é projetado para frente pela própria taxa de desconto
 Não é uma nova projeção de fluxo de caixa — é o mesmo valor justo do DCF,
 só que na data futura em vez de hoje (a lógica-padrão usada por analistas
 para converter um valor justo de longo prazo em um alvo de curto prazo).
+
+## Busca de preço/beta no Yahoo Finance mais resiliente, e confirmação do que foi carregado
+
+Dois problemas relatados no formulário de dados de mercado (Modo B):
+
+- **"Buscar preço, beta e 10Y no Yahoo Finance" falhando** com "ticker não
+  encontrado ou sem preço disponível" mesmo para tickers reais e líquidos
+  (ex.: AAPL). Isso é um problema conhecido do endpoint `.info` do
+  `yfinance`/Yahoo Finance — ele intermitentemente volta vazio ou sem os
+  campos de preço quando o Yahoo aplica rate-limit ou exige um crumb/cookie
+  que a sessão do `yfinance` não conseguiu obter (não é um problema do
+  ticker em si). `fetch_market_data()` agora tenta, em cascata, três
+  fontes para o preço antes de desistir: `.info` (também a única fonte de
+  beta), depois `.fast_info`, depois o preço de fechamento de `.history()`
+  — a mesma técnica que `_fetch_risk_free_rate()` já usava para o Treasury.
+- **Suspeita de que o Beta digitado manualmente não estava sendo usado no
+  cálculo do WACC.** Testado extensivamente (upload novo, re-upload
+  sobrescrevendo uma empresa existente, com e sem uma tentativa de busca
+  via Yahoo falhando antes) — em todos os casos o valor de Beta digitado
+  chegou corretamente até a tabela de WACC. Não foi possível reproduzir
+  uma falha real no fluxo de dados. Para tornar qualquer discrepância
+  futura imediatamente visível (e cobrir a hipótese mais provável — um
+  envio anterior ter falhado silenciosamente, deixando dados antigos na
+  tela), o app agora mostra, na página principal e não só na barra
+  lateral, uma confirmação com os 4 valores exatos (preço, beta,
+  risk-free, ERP) que foram de fato gravados a cada envio do formulário —
+  ou o erro exato, se o envio falhar.
