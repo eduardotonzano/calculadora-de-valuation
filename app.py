@@ -220,14 +220,16 @@ def load_ticker_reference() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_risk_free_rate() -> float | None:
-    """10Y Treasury yield from ^TNX (quoted at 10x the yield in percentage
-    points, e.g. 44.5 -> 4.45%)."""
+    """10Y Treasury yield from ^TNX. Yahoo quotes ^TNX directly as the yield
+    in percentage points (e.g. a close of 4.80 means a 4.80% yield) -- not
+    the old 10x-scaled convention some other data providers historically
+    used for this index -- so this only needs /100 to get a fraction."""
     try:
         hist = yf.Ticker("^TNX").history(period="5d")
         closes = hist["Close"].dropna()
         if closes.empty:
             return None
-        return float(closes.iloc[-1]) / 1000
+        return float(closes.iloc[-1]) / 100
     except Exception:  # noqa: BLE001 — network/parse failures degrade to manual entry
         return None
 
