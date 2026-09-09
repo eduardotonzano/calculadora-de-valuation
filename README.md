@@ -733,3 +733,43 @@ outras fontes usavam. Na prática o Yahoo cota `^TNX` diretamente como o
 yield em pontos percentuais (fechamento 4.80 = yield de 4.80%), então
 dividir por 1000 devolvia 0.48% em vez de 4.80% (exatamente o erro
 relatado). Corrigido para dividir por 100.
+
+## Quatro extensões: saúde financeira, comps, preço-alvo ponderado, tese qualitativa
+
+Quatro módulos novos, cada um com CLI própria e testes, agora também
+ligados na interface Streamlit:
+
+- **`health.py`** — dívida líquida/EBITDA e cobertura de juros (EBIT/despesa
+  financeira) do último ano reportado, cada um com um sinal
+  saudável/atenção/alavancada-fraca (regras de bolso comuns no
+  sell-side, não um modelo de rating). Novo card "Saúde financeira" na
+  aba Sumário.
+- **`comps.py`** — múltiplos atuais (EV/EBITDA, P/E LTM/fwd, PEG) de peers
+  informados pelo analista, via Yahoo Finance, comparados aos múltiplos
+  da própria empresa (prêmio/desconto vs. mediana dos peers). Não existe
+  API gratuita para descobrir peers automaticamente — isso continua
+  sendo julgamento do analista, como uma tabela de comps feita à mão.
+  Nova seção "Comps de mercado (peers)" na aba Múltiplos.
+- **`target_price.expected_value_price()`** — combina os preços-alvo
+  bear/base/bull do DCF num único número usando probabilidades
+  atribuídas pelo analista (não inferidas pelo modelo), sempre exibidas
+  ao lado do resultado. Novo controle "Preço-alvo esperado (ponderado
+  por probabilidade)" na aba Sumário.
+- **`thesis.py`** — camada qualitativa pura (nenhum cálculo): caso
+  bull/bear em texto livre, riscos que o DCF não captura, e um
+  calendário de catalisadores (data de resultados, decisão regulatória,
+  etc.). Nova aba "Tese".
+
+`dcf_engine.get_wacc()` também ganhou `country_risk_premium` (soma ao
+custo de equity: `Ke = Rf + β×ERP + country_risk_premium`) — 0% por
+padrão, o que não altera nenhum resultado já validado (AppLovin, etc.);
+existe para o dia em que este projeto for apontado para uma ação fora de
+um mercado maduro (ex.: B3), onde simplesmente troca risk-free rate por
+um yield local não é o ajuste certo. As duas tabelas novas
+(`investment_thesis`, `catalysts`) e a coluna nova (`wacc_inputs.country_risk_premium`)
+são adicionadas automaticamente por `migrate_schema()` a qualquer banco
+já existente — nenhum passo manual de migração é necessário.
+
+45 testes agora (31 + 14 novos em `tests/test_extensions.py`), cobrindo
+saúde financeira, a matemática de comps (sem rede), `expected_value_price()`
+e o CRUD de tese/catalisadores.

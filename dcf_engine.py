@@ -61,7 +61,14 @@ def get_wacc(conn: sqlite3.Connection, company_id: int) -> dict:
     if inputs is None or latest_actual is None:
         raise ValueError("Missing wacc_inputs or actual historicals")
 
-    cost_of_equity = inputs["risk_free_rate"] + inputs["beta"] * inputs["equity_risk_premium"]
+    # country_risk_premium is 0.0 by default (correct for a US stock, see
+    # schema.sql) and only adds to Ke when a non-zero value was supplied
+    # for a non-US equity -- it never changes behavior for the AppLovin/
+    # Blackstone/Alphabet cases already validated against $388.54 etc.
+    country_risk_premium = inputs.get("country_risk_premium") or 0.0
+    cost_of_equity = (
+        inputs["risk_free_rate"] + inputs["beta"] * inputs["equity_risk_premium"] + country_risk_premium
+    )
 
     total_debt = latest_actual["long_term_debt"]
     if total_debt == 0:
@@ -94,6 +101,7 @@ def get_wacc(conn: sqlite3.Connection, company_id: int) -> dict:
         "risk_free_rate": inputs["risk_free_rate"],
         "beta": inputs["beta"],
         "equity_risk_premium": inputs["equity_risk_premium"],
+        "country_risk_premium": country_risk_premium,
         "source": inputs.get("source") or "Fonte não registrada",
         "cost_of_equity": cost_of_equity,
         "total_debt": total_debt,

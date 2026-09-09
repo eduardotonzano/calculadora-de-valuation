@@ -620,6 +620,7 @@ def migrate_schema(conn: sqlite3.Connection, schema_path: Path) -> None:
     _ensure_column(conn, "historicals", "shares_diluted", "REAL")
     _ensure_column(conn, "companies", "data_source", "TEXT NOT NULL DEFAULT 'modl_tabs'")
     _ensure_column(conn, "wacc_inputs", "source", "TEXT")
+    _ensure_column(conn, "wacc_inputs", "country_risk_premium", "REAL NOT NULL DEFAULT 0.0")
 
 
 def write_to_db(db_path: Path, schema_path: Path, data: dict) -> None:
