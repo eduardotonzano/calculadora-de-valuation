@@ -450,12 +450,14 @@ ticker = st.sidebar.selectbox("Empresa", tickers, index=default_ticker_index)
 scenario = st.sidebar.radio("Cenário", ["bear", "base", "bull"], index=1, horizontal=True)
 explicit_years = st.sidebar.radio(
     "Anos de projeção explícita (DCF)",
-    [5, 13],
-    index=0,
+    [1, 2, 5, 10],
+    index=2,
     help=(
-        "O arquivo Bloomberg original soma apenas 5 anos na avaliação principal "
-        "(o preço-alvo de $388.54 validado no caso base) apesar de projetar 13 "
-        "anos completos. Ver aba Metodologia."
+        "Quantos anos de fluxo de caixa são somados diretamente (o resto vira "
+        "valor terminal). O arquivo Bloomberg original soma 5 anos na sua "
+        "avaliação principal (o preço-alvo de $388.54 validado no caso base "
+        "da AppLovin) apesar de projetar 13 anos completos — ver aba "
+        "Metodologia."
     ),
 )
 target_year = st.sidebar.selectbox(
@@ -485,15 +487,31 @@ tab_summary, tab_wacc, tab_dcf, tab_terminal, tab_multiples, tab_sens, tab_metho
 
 # =============================================================== Sumário ===
 with tab_summary:
+    # Sell-side research quotes a price target for a near-term horizon (e.g.
+    # Morgan Stanley's $350 Vertiv target, 12-18 months out), not the DCF's
+    # own "as of today" present value. Rolling the DCF price forward at its
+    # own discount rate (WACC) is the standard way to turn a present-value
+    # fair value into a forward-looking target without re-running a new
+    # projection — the intrinsic value grows at the cost of capital as the
+    # valuation date moves forward, all else equal.
+    pt_12m = dcf_result["price_per_share"] * (1 + dcf_result["wacc_used"]) ** 1.0
+    pt_18m = dcf_result["price_per_share"] * (1 + dcf_result["wacc_used"]) ** 1.5
+    upside_12m = pt_12m / current_price - 1
+    upside_18m = pt_18m / current_price - 1
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Preço atual", f"${current_price:,.2f}")
     m2.metric(
-        "Preço-alvo (DCF)",
+        "Preço-alvo (DCF, hoje)",
         f"${dcf_result['price_per_share']:,.2f}",
         f"{dcf_result['price_per_share'] / current_price - 1:+.1%}",
     )
     m3.metric("WACC", f"{dcf_result['wacc_used']:.2%}")
     m4.metric("g implícito (perpetuidade)", f"{dcf_result['implied_perpetuity_growth_rate']:.2%}")
+
+    m5, m6 = st.columns(2)
+    m5.metric("Preço-alvo (12 meses)", f"${pt_12m:,.2f}", f"{upside_12m:+.1%}")
+    m6.metric("Preço-alvo (18 meses)", f"${pt_18m:,.2f}", f"{upside_18m:+.1%}")
 
     st.markdown(
         f"Equity Value (\\${dcf_result['equity_value']:,.0f}M) ÷ "
@@ -502,6 +520,18 @@ with tab_summary:
         f"**{explicit_years} de {dcf_result['total_projected_years']}** anos de "
         f"projeção explícita para o caso **{scenario}**. Detalhe completo do cálculo "
         f"nas abas *WACC*, *Projeção & FCF* e *Valor Terminal*."
+    )
+    formula(
+        "Preço-alvo (12 meses) = Preço-alvo (DCF) × (1 + WACC) ^ 1\n"
+        "Preço-alvo (18 meses) = Preço-alvo (DCF) × (1 + WACC) ^ 1,5"
+    )
+    st.caption(
+        "O preço-alvo do DCF é um valor presente \"de hoje\". Para expressar um "
+        "alvo no horizonte de 12–18 meses que relatórios de research realmente "
+        "usam (ex.: o alvo de US\\$350 da Morgan Stanley para a Vertiv), ele é "
+        "projetado para frente pela própria taxa de desconto (WACC) — não é uma "
+        "nova projeção de fluxo de caixa, é o mesmo valor justo, só que na data "
+        "futura em vez de hoje."
     )
 
     st.subheader("Football field — comparação de métodos")
@@ -1151,6 +1181,7 @@ with tab_glossary:
         ("Ano-alvo (target year)", "O ano futuro para o qual um método de múltiplo projeta um preço — o preço-alvo nominal é o valor esperado *nesse* ano, sem desconto."),
         ("Valor Presente (do preço-alvo)", "O preço-alvo nominal trazido para hoje via desconto ao WACC pelo número de anos até o ano-alvo — a base comparável ao preço do DCF, que já é um valor presente."),
         ("Upside / (Downside)", "Variação percentual entre um preço-alvo (ou seu valor presente) e o preço atual da ação."),
+        ("Preço-alvo (12–18 meses)", "O preço-alvo do DCF (um valor presente 'de hoje') projetado para frente pela própria taxa de desconto (WACC), no formato de horizonte que relatórios de research realmente usam (ex.: o alvo de 12-18 meses da Morgan Stanley para a Vertiv) — não é uma nova projeção de fluxo de caixa, é o mesmo valor justo em uma data futura."),
         ("Football field", "Gráfico que compara os preços-alvo de vários métodos lado a lado como barras horizontais, para visualizar a dispersão de estimativas."),
     ])
 
