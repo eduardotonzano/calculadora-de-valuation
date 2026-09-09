@@ -701,3 +701,25 @@ Dois problemas relatados no formulário de dados de mercado (Modo B):
   lateral, uma confirmação com os 4 valores exatos (preço, beta,
   risk-free, ERP) que foram de fato gravados a cada envio do formulário —
   ou o erro exato, se o envio falhar.
+
+## Lista de tickers ampliada via SEC EDGAR (não Bloomberg/Investing/CNBC)
+
+O pedido era ampliar a lista curada de ~90 tickers e olhar outras fontes
+especializadas (Investing.com, Bloomberg, CNBC). Nenhuma dessas três
+oferece uma API pública e gratuita para baixar uma lista completa de
+tickers — Bloomberg é um terminal pago, e Investing.com/CNBC não têm API
+oficial (e este projeto não faz scraping de sites que não autorizam isso
+nos termos de uso). A alternativa gratuita, oficial e sem essa restrição
+para nomes listados nos EUA é a própria SEC (EDGAR): o arquivo
+`company_tickers_exchange.json` traz ticker, nome e bolsa (NYSE, Nasdaq,
+NYSE American etc.) para todas as ~10 mil empresas com obrigação de
+reportar à SEC — muito mais abrangente que a lista curada.
+
+`load_ticker_reference()` agora busca esse arquivo (`fetch_sec_tickers()`,
+com o User-Agent identificado que a SEC exige de todo cliente, cache de
+24h) e combina com o CSV curado, que continua existindo por dois motivos:
+cobre a B3/Ibovespa (a SEC não tem esses tickers) e funciona como
+fallback caso a busca à SEC falhe (sem rede, rate-limit etc.) — o mesmo
+padrão de "nunca quebrar, sempre degradar" usado em `fetch_market_data()`.
+Como sempre, digitar qualquer outro ticker real que não esteja em nenhuma
+das duas listas continua funcionando via busca direta no Yahoo Finance.

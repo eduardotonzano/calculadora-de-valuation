@@ -21,6 +21,7 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -173,16 +174,48 @@ def get_latest_actual(conn: sqlite3.Connection, company_id: int) -> dict:
 DEFAULT_ERP = 0.0445
 TICKERS_PATH = Path(__file__).parent / "data" / "tickers.csv"
 
+# SEC EDGAR's own ticker/exchange file: the free, official, ToS-compliant
+# source for a full list of US-listed tickers. Bloomberg, Investing.com and
+# CNBC don't offer a free bulk ticker API and scraping their sites isn't
+# something this project does -- SEC EDGAR is the legitimate equivalent for
+# US names. SEC requires a descriptive User-Agent identifying the
+# app/contact on every request (https://www.sec.gov/os/webmaster-faq#developers).
+SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
+SEC_USER_AGENT = "Calculadora de Valuation contato@example.com"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_sec_tickers() -> pd.DataFrame | None:
+    """All US-listed tickers (NYSE, Nasdaq, NYSE American, Cboe, ...) from
+    SEC EDGAR -- several thousand names, refreshed daily. Returns None on
+    any failure (network blocked, SEC rate-limiting, unexpected format) so
+    the caller can fall back to the curated CSV instead of breaking the
+    picker."""
+    try:
+        resp = requests.get(SEC_TICKERS_URL, headers={"User-Agent": SEC_USER_AGENT}, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        df = pd.DataFrame(payload["data"], columns=payload["fields"])
+        return df[["ticker", "name", "exchange"]].dropna(subset=["ticker"])
+    except Exception:  # noqa: BLE001 — degrades to the curated CSV
+        return None
+
 
 @st.cache_data
 def load_ticker_reference() -> pd.DataFrame:
-    """A small curated set of large/liquid tickers (S&P 500 blue chips,
-    other well-known NASDAQ/NYSE names, Ibovespa) for the sidebar's
-    autocomplete -- not an exhaustive exchange listing (see README).
-    Typing any other real ticker still works via fetch_market_data()."""
-    if not TICKERS_PATH.exists():
-        return pd.DataFrame(columns=["ticker", "name", "exchange"])
-    return pd.read_csv(TICKERS_PATH)
+    """Ticker list for the sidebar's autocomplete: SEC EDGAR's full list of
+    US-listed names (thousands of tickers) when reachable, plus the
+    curated CSV (SEC doesn't cover B3/Ibovespa, and stays as a fallback if
+    SEC is unreachable -- e.g. offline, or SEC rate-limiting). Typing any
+    other real ticker not in either list still works via
+    fetch_market_data()."""
+    curated = pd.read_csv(TICKERS_PATH) if TICKERS_PATH.exists() else pd.DataFrame(columns=["ticker", "name", "exchange"])
+    sec_df = fetch_sec_tickers()
+    if sec_df is None or sec_df.empty:
+        return curated
+    combined = pd.concat([sec_df, curated], ignore_index=True)
+    combined = combined.drop_duplicates(subset="ticker", keep="first")
+    return combined.sort_values("ticker").reset_index(drop=True)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
