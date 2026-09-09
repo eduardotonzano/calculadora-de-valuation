@@ -723,3 +723,13 @@ fallback caso a busca à SEC falhe (sem rede, rate-limit etc.) — o mesmo
 padrão de "nunca quebrar, sempre degradar" usado em `fetch_market_data()`.
 Como sempre, digitar qualquer outro ticker real que não esteja em nenhuma
 das duas listas continua funcionando via busca direta no Yahoo Finance.
+
+## Bug: risk-free rate saindo 10x menor que o real
+
+`_fetch_risk_free_rate()` dividia o fechamento do `^TNX` por 1000, com
+base numa suposição errada (registrada no próprio comentário do código)
+de que o Yahoo cota esse índice a 10x o yield — convenção antiga que
+outras fontes usavam. Na prática o Yahoo cota `^TNX` diretamente como o
+yield em pontos percentuais (fechamento 4.80 = yield de 4.80%), então
+dividir por 1000 devolvia 0.48% em vez de 4.80% (exatamente o erro
+relatado). Corrigido para dividir por 100.
